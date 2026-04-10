@@ -44,6 +44,7 @@ Individual targets:
 | `make tdlib` | Build TDLib only (into `td-install/`) |
 | `make build` | Build call_service only (assumes TDLib is built) |
 | `make prompt` | Generate a test beep prompt (MP3) |
+| `make glados-prompt` | Generate prompt via GLaDOS TTS |
 | `make run` | Build + generate prompt + run the service |
 | `make clean` | Remove build directories |
 
@@ -80,6 +81,10 @@ cp greeting.mp3 prompt.mp3
 
 # or generate a test beep
 make prompt
+
+# or generate a GLaDOS voice prompt (https://glados.c-net.org/)
+make glados-prompt
+make glados-prompt GLADOS_TEXT="The cake is a lie. Leave a message."
 ```
 
 ### Run
