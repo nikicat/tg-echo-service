@@ -1,6 +1,6 @@
 # tg-call-service
 
-Pure C++ service that accepts incoming Telegram voice calls, plays a PCM audio prompt in a loop, and records the caller's audio.
+Pure C++ service that accepts incoming Telegram voice calls, plays a PCM audio prompt, echoes the caller's audio back with a configurable delay, records to MP3, and sends the recording as a voice message after the call ends.
 
 Uses [TDLib](https://github.com/tdlib/td) for Telegram signaling and [tgcalls](https://github.com/TGX-Android/tgcalls) for WebRTC audio.
 
@@ -12,8 +12,8 @@ TDLib (signaling)              tgcalls (WebRTC audio)
   acceptCall                  FakeAudioDeviceModule
   sendCallSignalingData <───  signalingDataEmitted
   updateNewCallSignaling ───> receiveSignalingData()
-  discardCall                 FilePlayer  -> prompt.raw loop
-                              FileRecorder -> recordings/*.raw
+  discardCall                 EchoPlayer  -> prompt once, then echo
+  sendMessage (voice note)    FileRecorder -> recordings/*.mp3
 ```
 
 ## Prerequisites
@@ -21,7 +21,7 @@ TDLib (signaling)              tgcalls (WebRTC audio)
 ### System packages (Arch Linux)
 
 ```
-pacman -S openssl opus libvpx libyuv ffmpeg zlib gperf cmake
+pacman -S openssl opus libvpx libyuv ffmpeg zlib gperf cmake lame
 ```
 
 All C++ dependencies (tgcalls, WebRTC, abseil, libsrtp, usrsctp, openh264, rnnoise, crc32c, libevent, libyuv) are vendored as git submodules under `vendor/`.
@@ -88,8 +88,14 @@ ffmpeg -f lavfi -i "sine=frequency=440:duration=0.3" \
 ### Run
 
 ```bash
-./build/call_service [--prompt prompt.raw] [--recordings-dir recordings/]
+./build/call_service [--prompt prompt.raw] [--recordings-dir recordings/] [--echo-delay 1000]
 ```
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--prompt` | — | `prompt.raw` | PCM audio prompt file |
+| `--recordings-dir` | — | `recordings/` | Directory for MP3 recordings |
+| `--echo-delay` | `ECHO_DELAY` | `1000` | Echo delay in milliseconds |
 
 On first run, TDLib will prompt interactively for:
 1. Phone number
@@ -102,18 +108,12 @@ TDLib persists its session in `tdlib_db/` in the working directory. Subsequent r
 
 ### Recordings
 
-Caller audio is saved to `recordings/recording_<unix_timestamp>.raw` in the same PCM format as the prompt (48kHz, stereo, s16le).
+Caller audio is saved as MP3 to `recordings/recording_<unix_timestamp>.mp3` (VBR, high quality). After the call ends, the recording is automatically sent back to the caller as a Telegram voice message.
 
 Play back:
 
 ```bash
-ffplay -f s16le -ar 48000 -ch_layout stereo recordings/recording_*.raw
-```
-
-Convert to WAV:
-
-```bash
-ffmpeg -f s16le -ar 48000 -ch_layout stereo -i recording.raw recording.wav
+ffplay recordings/recording_*.mp3
 ```
 
 ## How it works
@@ -122,15 +122,15 @@ ffmpeg -f s16le -ar 48000 -ch_layout stereo -i recording.raw recording.wav
 2. Service sends `acceptCall` with supported tgcalls protocol versions
 3. TDLib receives `callStateReady` with relay servers and encryption key
 4. Service maps TDLib call servers to tgcalls endpoints/RTC servers, creates a tgcalls `Instance` via `Meta::Create`
-5. `FakeAudioDeviceModule` provides custom audio I/O: `FilePlayer` reads `prompt.raw` in a loop, `FileRecorder` writes caller audio to disk
+5. `FakeAudioDeviceModule` provides custom audio I/O via `EchoPlayer` (implements both `Recorder` and `Renderer`): plays the prompt once, then echoes caller audio back with a configurable delay. `FileRecorder` encodes to MP3 via LAME
 6. Signaling data is relayed bidirectionally between TDLib and tgcalls
-7. On hangup, the recording file is closed and the service waits for the next call
+7. On hangup, the MP3 recording is finalized and sent to the caller as a voice message via `sendMessage` + `inputMessageVoiceNote`
 
 ## Project structure
 
 ```
 CMakeLists.txt                Build orchestrator (vendored deps + tgcalls + our code)
-main.cpp                      FilePlayer, FileRecorder, CallService, auth flow, event loop
+main.cpp                      EchoPlayer, FileRecorder, CallService, auth flow, event loop
 stub/                         Build stubs (config.h, crc32c config, AudioDeviceModule stub)
 vendor/                       Vendored dependencies (git submodules + cmake files)
   Build*.cmake                CMake build scripts (from Telegram-X)
