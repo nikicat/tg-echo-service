@@ -3,4 +3,5 @@ td-install/
 tdlib_db/
 recordings/
 prompt.raw
+prompt.mp3
 .envrc
