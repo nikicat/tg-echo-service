@@ -315,10 +315,12 @@ private:
 
     // Active call state
     int32_t active_call_id_ = 0;
+    int64_t caller_user_id_ = 0;
     bool active_call_outgoing_ = false;
     std::unique_ptr<tgcalls::Instance> tgcalls_instance_;
     std::shared_ptr<EchoPlayer> echo_player_;
     std::shared_ptr<FileRecorder> file_recorder_;
+    std::string recording_path_;
 
     void send_query(td_api::object_ptr<td_api::Function> f, std::function<void(Object)> handler) {
         auto id = ++query_id_;
@@ -424,6 +426,7 @@ private:
             if (!call->is_outgoing_ && active_call_id_ == 0) {
                 // Incoming call — accept it
                 active_call_id_ = call_id;
+                caller_user_id_ = call->user_id_;
                 active_call_outgoing_ = false;
                 std::cout << "Incoming call #" << call_id << " from user " << call->user_id_ << " — accepting" << std::endl;
 
@@ -547,8 +550,8 @@ private:
         }
 
         // Audio: echo player + MP3 recorder
-        std::string rec_path = recordings_dir_ + "/recording_" + timestamp_string() + ".mp3";
-        file_recorder_ = std::make_shared<FileRecorder>(rec_path);
+        recording_path_ = recordings_dir_ + "/recording_" + timestamp_string() + ".mp3";
+        file_recorder_ = std::make_shared<FileRecorder>(recording_path_);
         echo_player_ = std::make_shared<EchoPlayer>(prompt_file_, echo_delay_ms_, file_recorder_);
 
         int max_layer = ready.protocol_ ? ready.protocol_->max_layer_ : 92;
@@ -612,8 +615,43 @@ private:
         }
         echo_player_.reset();
         file_recorder_.reset();
+
+        // Send recording as voice message to the caller
+        if (caller_user_id_ != 0 && !recording_path_.empty()) {
+            send_voice_message(caller_user_id_, recording_path_);
+        }
+
         active_call_id_ = 0;
+        caller_user_id_ = 0;
+        recording_path_.clear();
         std::cout << "Waiting for next call..." << std::endl;
+    }
+
+    void send_voice_message(int64_t user_id, const std::string &path) {
+        std::cout << "Sending voice message to user " << user_id << ": " << path << std::endl;
+        send_query(td_api::make_object<td_api::createPrivateChat>(user_id, false),
+            [this, path](Object response) {
+                if (response->get_id() == td_api::error::ID) {
+                    auto &err = static_cast<td_api::error &>(*response);
+                    std::cerr << "Failed to create chat: " << err.message_ << std::endl;
+                    return;
+                }
+                auto &chat = static_cast<td_api::chat &>(*response);
+                send_query(td_api::make_object<td_api::sendMessage>(
+                    chat.id_, nullptr, nullptr, nullptr, nullptr,
+                    td_api::make_object<td_api::inputMessageVoiceNote>(
+                        td_api::make_object<td_api::inputFileLocal>(path),
+                        0, "", nullptr, nullptr
+                    )
+                ), [path](Object response) {
+                    if (response->get_id() == td_api::error::ID) {
+                        auto &err = static_cast<td_api::error &>(*response);
+                        std::cerr << "Failed to send voice message: " << err.message_ << std::endl;
+                    } else {
+                        std::cout << "Voice message sent: " << path << std::endl;
+                    }
+                });
+            });
     }
 };
 
