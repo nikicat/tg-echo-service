@@ -46,6 +46,12 @@ find_library(AVUTIL_LIB avutil REQUIRED)
 add_library(avcodec INTERFACE)
 target_link_libraries(avcodec INTERFACE ${AVCODEC_LIB} ${AVUTIL_LIB})
 
+# LAME MP3 encoder (for recording output)
+find_library(MP3LAME_LIB mp3lame REQUIRED)
+add_library(mp3lame INTERFACE)
+target_link_libraries(mp3lame INTERFACE ${MP3LAME_LIB})
+target_include_directories(mp3lame INTERFACE /usr/include/lame)
+
 # -- Include vendored dependency builds --
 # These create static library targets: usrsctp, srtp, openh264, absl, json11, rnnoise, webrtc
 
@@ -204,6 +210,7 @@ add_executable(call_service main.cpp)
 target_link_libraries(call_service PRIVATE
   tgcalls
   Td::TdStatic
+  mp3lame
 )
 
 target_include_directories(call_service PRIVATE

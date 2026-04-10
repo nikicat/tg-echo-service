@@ -11,6 +11,8 @@
 #include "tgcalls/v2/InstanceV2ReferenceImpl.h"
 #include "tgcalls/FakeAudioDeviceModule.h"
 
+#include <lame/lame.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -91,24 +93,77 @@ private:
 
 class FileRecorder : public tgcalls::FakeAudioDeviceModule::Renderer {
 public:
-    explicit FileRecorder(const std::string &path) : path_(path) {
+    explicit FileRecorder(const std::string &path, int sample_rate = 48000, int num_channels = 2)
+        : path_(path), num_channels_(num_channels) {
         file_.open(path, std::ios::binary);
         if (!file_) {
             std::cerr << "Failed to open recording file: " << path << std::endl;
+            return;
+        }
+
+        lame_ = lame_init();
+        if (!lame_) {
+            std::cerr << "Failed to initialize LAME encoder" << std::endl;
+            file_.close();
+            return;
+        }
+        lame_set_in_samplerate(lame_, sample_rate);
+        lame_set_num_channels(lame_, num_channels);
+        lame_set_quality(lame_, 2);  // high quality
+        lame_set_VBR(lame_, vbr_default);
+        if (lame_init_params(lame_) < 0) {
+            std::cerr << "Failed to set LAME parameters" << std::endl;
+            lame_close(lame_);
+            lame_ = nullptr;
+            file_.close();
         }
     }
 
     bool Render(const tgcalls::AudioFrame &frame) override {
-        if (file_ && frame.num_samples > 0 && frame.audio_samples) {
-            // num_samples is total samples (all channels), each is int16_t
-            size_t bytes = frame.num_samples * sizeof(int16_t);
-            file_.write(reinterpret_cast<const char *>(frame.audio_samples), bytes);
-            total_bytes_ += bytes;
+        if (!file_ || !lame_ || frame.num_samples == 0 || !frame.audio_samples)
+            return true;
+
+        int samples_per_channel = static_cast<int>(frame.num_samples / num_channels_);
+
+        // Ensure MP3 buffer is large enough (worst case: 1.25 * samples + 7200)
+        size_t mp3_buf_size = static_cast<size_t>(1.25 * samples_per_channel) + 7200;
+        if (mp3_buffer_.size() < mp3_buf_size)
+            mp3_buffer_.resize(mp3_buf_size);
+
+        int mp3_bytes;
+        if (num_channels_ == 2) {
+            mp3_bytes = lame_encode_buffer_interleaved(
+                lame_, const_cast<short *>(frame.audio_samples),
+                samples_per_channel, mp3_buffer_.data(),
+                static_cast<int>(mp3_buffer_.size()));
+        } else {
+            mp3_bytes = lame_encode_buffer(
+                lame_, frame.audio_samples, nullptr,
+                samples_per_channel, mp3_buffer_.data(),
+                static_cast<int>(mp3_buffer_.size()));
+        }
+
+        if (mp3_bytes > 0) {
+            file_.write(reinterpret_cast<const char *>(mp3_buffer_.data()), mp3_bytes);
+            total_bytes_ += mp3_bytes;
         }
         return true;
     }
 
     ~FileRecorder() override {
+        if (lame_ && file_) {
+            // Flush remaining MP3 frames
+            if (mp3_buffer_.size() < 7200)
+                mp3_buffer_.resize(7200);
+            int flush_bytes = lame_encode_flush(lame_, mp3_buffer_.data(),
+                                                static_cast<int>(mp3_buffer_.size()));
+            if (flush_bytes > 0) {
+                file_.write(reinterpret_cast<const char *>(mp3_buffer_.data()), flush_bytes);
+                total_bytes_ += flush_bytes;
+            }
+        }
+        if (lame_)
+            lame_close(lame_);
         if (file_) {
             file_.close();
             std::cout << "Recording saved: " << path_ << " (" << total_bytes_ << " bytes)" << std::endl;
@@ -118,6 +173,9 @@ public:
 private:
     std::string path_;
     std::ofstream file_;
+    lame_global_flags *lame_ = nullptr;
+    int num_channels_;
+    std::vector<unsigned char> mp3_buffer_;
     size_t total_bytes_ = 0;
 };
 
@@ -426,7 +484,7 @@ private:
 
         // Audio: file player + recorder
         player_ = std::make_shared<FilePlayer>(prompt_file_);
-        std::string rec_path = recordings_dir_ + "/recording_" + timestamp_string() + ".raw";
+        std::string rec_path = recordings_dir_ + "/recording_" + timestamp_string() + ".mp3";
         recorder_ = std::make_shared<FileRecorder>(rec_path);
 
         int max_layer = ready.protocol_ ? ready.protocol_->max_layer_ : 92;
