@@ -1,4 +1,4 @@
-// Telegram Call Service — accepts incoming calls, plays prompt, records caller audio
+// Telegram Call Service — accepts incoming calls, plays prompt, echoes caller audio, records to MP3
 // Uses TDLib for signaling + tgcalls for audio
 
 #include <td/telegram/Client.h>
@@ -28,68 +28,7 @@
 
 namespace td_api = td::td_api;
 
-// -- File-based audio player (reads prompt.raw, loops) --
-
-class FilePlayer : public tgcalls::FakeAudioDeviceModule::Recorder {
-public:
-    explicit FilePlayer(const std::string &path) {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file) {
-            std::cerr << "Failed to open prompt file: " << path << std::endl;
-            return;
-        }
-        auto size = file.tellg();
-        file.seekg(0);
-        data_.resize(size);
-        file.read(reinterpret_cast<char *>(data_.data()), size);
-        std::cout << "Loaded prompt: " << path << " (" << size << " bytes)" << std::endl;
-    }
-
-    tgcalls::AudioFrame Record() override {
-        tgcalls::AudioFrame frame{};
-        if (data_.empty()) {
-            frame.num_samples = 0;
-            return frame;
-        }
-
-        constexpr size_t samples_per_frame = 480;  // 10ms at 48kHz
-        constexpr size_t channels = 2;
-        constexpr size_t frame_bytes = samples_per_frame * channels * sizeof(int16_t);
-
-        // Ensure buffer is allocated
-        if (buffer_.size() < samples_per_frame * channels) {
-            buffer_.resize(samples_per_frame * channels);
-        }
-
-        size_t bytes_copied = 0;
-        while (bytes_copied < frame_bytes) {
-            size_t remaining = frame_bytes - bytes_copied;
-            size_t available = data_.size() - position_;
-            size_t to_copy = std::min(remaining, available);
-            std::memcpy(reinterpret_cast<char *>(buffer_.data()) + bytes_copied,
-                        data_.data() + position_, to_copy);
-            bytes_copied += to_copy;
-            position_ += to_copy;
-            if (position_ >= data_.size()) {
-                position_ = 0;  // Loop
-            }
-        }
-
-        frame.audio_samples = buffer_.data();
-        frame.num_samples = samples_per_frame;
-        frame.bytes_per_sample = sizeof(int16_t);
-        frame.num_channels = channels;
-        frame.samples_per_sec = 48000;
-        return frame;
-    }
-
-private:
-    std::vector<uint8_t> data_;
-    std::vector<int16_t> buffer_;
-    size_t position_ = 0;
-};
-
-// -- File-based audio recorder (writes caller audio to file) --
+// -- MP3 audio recorder (writes caller audio to file) --
 
 class FileRecorder : public tgcalls::FakeAudioDeviceModule::Renderer {
 public:
@@ -179,6 +118,128 @@ private:
     size_t total_bytes_ = 0;
 };
 
+// -- Echo player: plays prompt once, then echoes caller audio with delay --
+
+class EchoPlayer : public tgcalls::FakeAudioDeviceModule::Recorder,
+                   public tgcalls::FakeAudioDeviceModule::Renderer {
+public:
+    static constexpr size_t kSamplesPerFrame = 480;  // 10ms at 48kHz
+    static constexpr size_t kChannels = 2;
+    static constexpr size_t kFrameInt16s = kSamplesPerFrame * kChannels;
+    static constexpr size_t kFrameBytes = kFrameInt16s * sizeof(int16_t);
+
+    EchoPlayer(const std::string &prompt_path, int delay_ms,
+               std::shared_ptr<FileRecorder> file_recorder)
+        : file_recorder_(std::move(file_recorder)),
+          delay_frames_(std::max(1, delay_ms / 10)),
+          out_buf_(kFrameInt16s, 0) {
+        // Load prompt
+        std::ifstream file(prompt_path, std::ios::binary | std::ios::ate);
+        if (!file) {
+            std::cerr << "Failed to open prompt file: " << prompt_path << std::endl;
+        } else {
+            auto size = file.tellg();
+            file.seekg(0);
+            prompt_data_.resize(size);
+            file.read(reinterpret_cast<char *>(prompt_data_.data()), size);
+            std::cout << "Loaded prompt: " << prompt_path << " (" << size << " bytes)" << std::endl;
+        }
+
+        // Allocate ring buffer for echo delay
+        ring_.resize(delay_frames_);
+        for (auto &f : ring_)
+            f.resize(kFrameInt16s, 0);
+
+        std::cout << "Echo delay: " << delay_ms << " ms (" << delay_frames_ << " frames)" << std::endl;
+    }
+
+    // Renderer: receives caller's audio (render thread)
+    bool Render(const tgcalls::AudioFrame &frame) override {
+        // Always record to MP3
+        if (file_recorder_)
+            file_recorder_->Render(frame);
+
+        if (frame.num_samples == 0 || !frame.audio_samples)
+            return true;
+
+        // Store in ring buffer for echo
+        std::lock_guard<std::mutex> lock(echo_mutex_);
+        std::memcpy(ring_[write_frame_].data(), frame.audio_samples,
+                     kFrameInt16s * sizeof(int16_t));
+        write_frame_ = (write_frame_ + 1) % delay_frames_;
+        frames_written_++;
+        return true;
+    }
+
+    // Recorder: provides audio to send (record thread)
+    tgcalls::AudioFrame Record() override {
+        tgcalls::AudioFrame frame{};
+        frame.audio_samples = out_buf_.data();
+        frame.num_samples = kSamplesPerFrame;
+        frame.bytes_per_sample = sizeof(int16_t);
+        frame.num_channels = kChannels;
+        frame.samples_per_sec = 48000;
+
+        // Phase 1: play prompt once
+        if (!prompt_done_) {
+            if (!prompt_data_.empty() && prompt_pos_ < prompt_data_.size()) {
+                size_t bytes_copied = 0;
+                while (bytes_copied < kFrameBytes && prompt_pos_ < prompt_data_.size()) {
+                    size_t to_copy = std::min(kFrameBytes - bytes_copied,
+                                              prompt_data_.size() - prompt_pos_);
+                    std::memcpy(reinterpret_cast<char *>(out_buf_.data()) + bytes_copied,
+                                prompt_data_.data() + prompt_pos_, to_copy);
+                    bytes_copied += to_copy;
+                    prompt_pos_ += to_copy;
+                }
+                if (bytes_copied < kFrameBytes) {
+                    std::memset(reinterpret_cast<char *>(out_buf_.data()) + bytes_copied,
+                                0, kFrameBytes - bytes_copied);
+                }
+                if (prompt_pos_ >= prompt_data_.size()) {
+                    prompt_done_ = true;
+                    std::cout << "Prompt finished, switching to echo mode" << std::endl;
+                }
+                return frame;
+            }
+            prompt_done_ = true;
+            std::cout << "No prompt data, switching to echo mode" << std::endl;
+        }
+
+        // Phase 2: echo with delay
+        {
+            std::lock_guard<std::mutex> lock(echo_mutex_);
+            if (frames_written_ < delay_frames_) {
+                // Not enough audio buffered yet — send silence
+                std::memset(out_buf_.data(), 0, kFrameInt16s * sizeof(int16_t));
+            } else {
+                // write_frame_ points to the oldest frame (delay_frames_ behind latest)
+                std::memcpy(out_buf_.data(), ring_[write_frame_].data(),
+                            kFrameInt16s * sizeof(int16_t));
+            }
+        }
+        return frame;
+    }
+
+private:
+    std::shared_ptr<FileRecorder> file_recorder_;
+    const size_t delay_frames_;
+
+    // Prompt state (only accessed from record thread)
+    std::vector<uint8_t> prompt_data_;
+    size_t prompt_pos_ = 0;
+    bool prompt_done_ = false;
+
+    // Echo ring buffer (shared between threads, protected by mutex)
+    std::mutex echo_mutex_;
+    std::vector<std::vector<int16_t>> ring_;
+    size_t write_frame_ = 0;
+    size_t frames_written_ = 0;
+
+    // Output buffer (only accessed from record thread)
+    std::vector<int16_t> out_buf_;
+};
+
 // -- Utility --
 
 static std::string hex_string(const std::string &bytes) {
@@ -204,9 +265,11 @@ static std::string timestamp_string() {
 class CallService {
 public:
     CallService(int32_t api_id, const std::string &api_hash,
-                const std::string &prompt_file, const std::string &recordings_dir)
+                const std::string &prompt_file, const std::string &recordings_dir,
+                int echo_delay_ms = 1000)
         : api_id_(api_id), api_hash_(api_hash),
-          prompt_file_(prompt_file), recordings_dir_(recordings_dir) {
+          prompt_file_(prompt_file), recordings_dir_(recordings_dir),
+          echo_delay_ms_(echo_delay_ms) {
 
         // Register tgcalls implementations
         tgcalls::Register<tgcalls::InstanceImpl>();
@@ -240,6 +303,7 @@ private:
     std::string api_hash_;
     std::string prompt_file_;
     std::string recordings_dir_;
+    int echo_delay_ms_;
     bool quit_ = false;
     bool authorized_ = false;
 
@@ -253,8 +317,8 @@ private:
     int32_t active_call_id_ = 0;
     bool active_call_outgoing_ = false;
     std::unique_ptr<tgcalls::Instance> tgcalls_instance_;
-    std::shared_ptr<FilePlayer> player_;
-    std::shared_ptr<FileRecorder> recorder_;
+    std::shared_ptr<EchoPlayer> echo_player_;
+    std::shared_ptr<FileRecorder> file_recorder_;
 
     void send_query(td_api::object_ptr<td_api::Function> f, std::function<void(Object)> handler) {
         auto id = ++query_id_;
@@ -482,10 +546,10 @@ private:
             std::memcpy(key->data(), ready.encryption_key_.data(), tgcalls::EncryptionKey::kSize);
         }
 
-        // Audio: file player + recorder
-        player_ = std::make_shared<FilePlayer>(prompt_file_);
+        // Audio: echo player + MP3 recorder
         std::string rec_path = recordings_dir_ + "/recording_" + timestamp_string() + ".mp3";
-        recorder_ = std::make_shared<FileRecorder>(rec_path);
+        file_recorder_ = std::make_shared<FileRecorder>(rec_path);
+        echo_player_ = std::make_shared<EchoPlayer>(prompt_file_, echo_delay_ms_, file_recorder_);
 
         int max_layer = ready.protocol_ ? ready.protocol_->max_layer_ : 92;
 
@@ -522,8 +586,8 @@ private:
                 send_query(td_api::make_object<td_api::sendCallSignalingData>(call_id, std::move(bytes)), {});
             },
             .createAudioDeviceModule = tgcalls::FakeAudioDeviceModule::Creator(
-                recorder_,   // Renderer — receives caller's audio
-                player_,     // Recorder — provides our audio to send
+                std::shared_ptr<tgcalls::FakeAudioDeviceModule::Renderer>(echo_player_, echo_player_.get()),
+                std::shared_ptr<tgcalls::FakeAudioDeviceModule::Recorder>(echo_player_, echo_player_.get()),
                 tgcalls::FakeAudioDeviceModule::Options{
                     .samples_per_sec = 48000,
                     .num_channels = 2
@@ -546,8 +610,8 @@ private:
             tgcalls_instance_->stop([](tgcalls::FinalState) {});
             tgcalls_instance_.reset();
         }
-        player_.reset();
-        recorder_.reset();
+        echo_player_.reset();
+        file_recorder_.reset();
         active_call_id_ = 0;
         std::cout << "Waiting for next call..." << std::endl;
     }
@@ -561,6 +625,7 @@ int main(int argc, char *argv[]) {
     std::string api_hash;
     std::string prompt_file = "prompt.raw";
     std::string recordings_dir = "recordings";
+    int echo_delay_ms = 1000;
 
     // Parse args
     for (int i = 1; i < argc; i++) {
@@ -573,8 +638,10 @@ int main(int argc, char *argv[]) {
             prompt_file = argv[++i];
         } else if (arg == "--recordings-dir" && i + 1 < argc) {
             recordings_dir = argv[++i];
+        } else if (arg == "--echo-delay" && i + 1 < argc) {
+            echo_delay_ms = std::stoi(argv[++i]);
         } else if (arg == "--help") {
-            std::cout << "Usage: " << argv[0] << " --api-id ID --api-hash HASH [--prompt FILE] [--recordings-dir DIR]" << std::endl;
+            std::cout << "Usage: " << argv[0] << " --api-id ID --api-hash HASH [--prompt FILE] [--recordings-dir DIR] [--echo-delay MS]" << std::endl;
             return 0;
         }
     }
@@ -588,6 +655,10 @@ int main(int argc, char *argv[]) {
         const char *env = std::getenv("API_HASH");
         if (env) api_hash = env;
     }
+    {
+        const char *env = std::getenv("ECHO_DELAY");
+        if (env) echo_delay_ms = std::stoi(env);
+    }
 
     if (api_id == 0 || api_hash.empty()) {
         std::cerr << "API_ID and API_HASH required (via --api-id/--api-hash or env vars)" << std::endl;
@@ -598,7 +669,7 @@ int main(int argc, char *argv[]) {
     std::string mkdir_cmd = "mkdir -p " + recordings_dir;
     system(mkdir_cmd.c_str());
 
-    CallService service(api_id, api_hash, prompt_file, recordings_dir);
+    CallService service(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms);
     service.run();
     return 0;
 }
