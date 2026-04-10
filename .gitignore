@@ -1,0 +1,6 @@
+build/
+td-install/
+tdlib_db/
+recordings/
+prompt.raw
+.envrc

@@ -1,0 +1,33 @@
+[submodule "vendor/tgcalls"]
+	path = vendor/tgcalls
+	url = https://github.com/TGX-Android/tgcalls
+[submodule "vendor/webrtc"]
+	path = vendor/webrtc
+	url = https://github.com/TGX-Android/webrtc
+[submodule "vendor/abseil-cpp"]
+	path = vendor/abseil-cpp
+	url = https://github.com/abseil/abseil-cpp
+[submodule "vendor/td"]
+	path = vendor/td
+	url = https://github.com/tdlib/td
+[submodule "vendor/libsrtp"]
+	path = vendor/libsrtp
+	url = https://github.com/cisco/libsrtp
+[submodule "vendor/usrsctp"]
+	path = vendor/usrsctp
+	url = https://github.com/sctplab/usrsctp
+[submodule "vendor/openh264"]
+	path = vendor/openh264
+	url = https://github.com/cisco/openh264
+[submodule "vendor/rnnoise"]
+	path = vendor/rnnoise
+	url = https://github.com/xiph/rnnoise
+[submodule "vendor/crc32c"]
+	path = vendor/crc32c
+	url = https://github.com/google/crc32c
+[submodule "vendor/libevent"]
+	path = vendor/libevent
+	url = https://github.com/TGX-Android/libevent
+[submodule "vendor/libyuv"]
+	path = vendor/libyuv
+	url = https://chromium.googlesource.com/libyuv/libyuv
