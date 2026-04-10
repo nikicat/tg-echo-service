@@ -1,4 +1,5 @@
 BUILD_TYPE ?= Debug
+BEEPS ?= 5
 
 # Extract -jN from MAKEFLAGS (set by make -jN), default to nproc
 ifneq (,$(filter -j%, $(MAKEFLAGS)))
@@ -35,14 +36,14 @@ build: build/call_service
 build/call_service: build/Makefile main.cpp
 	cmake --build build -j$(CMAKE_BUILD_PARALLEL_LEVEL)
 
-# Generate a test prompt (440Hz beep loop, 5 seconds, MP3)
+# Generate a test prompt (440Hz beeps, MP3). Override count: make prompt BEEPS=2
 prompt: prompt.mp3
 
 prompt.mp3:
 	ffmpeg -f lavfi -i "sine=frequency=440:duration=0.3" \
 	  -f lavfi -i "anullsrc=r=48000:cl=stereo" \
-	  -filter_complex "[0]aresample=48000,pan=stereo|c0=c0|c1=c0[beep];[1]atrim=0:0.7[silence];[beep][silence]concat=n=2:v=0:a=1,aloop=loop=4:size=48000[loop];[loop]aresample=48000" \
-	  -t 5 -ac 2 -ar 48000 $@ -y
+	  -filter_complex "[0]aresample=48000,pan=stereo|c0=c0|c1=c0[beep];[1]atrim=0:0.7[silence];[beep][silence]concat=n=2:v=0:a=1,aloop=loop=$$(($(BEEPS)-1)):size=48000[loop];[loop]aresample=48000" \
+	  -ac 2 -ar 48000 $@ -y
 
 # Run the service (requires API_ID and API_HASH env vars)
 run: build prompt
