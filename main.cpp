@@ -133,16 +133,10 @@ public:
         : file_recorder_(std::move(file_recorder)),
           delay_frames_(std::max(1, delay_ms / 10)),
           out_buf_(kFrameInt16s, 0) {
-        // Load prompt
-        std::ifstream file(prompt_path, std::ios::binary | std::ios::ate);
-        if (!file) {
-            std::cerr << "Failed to open prompt file: " << prompt_path << std::endl;
-        } else {
-            auto size = file.tellg();
-            file.seekg(0);
-            prompt_data_.resize(size);
-            file.read(reinterpret_cast<char *>(prompt_data_.data()), size);
-            std::cout << "Loaded prompt: " << prompt_path << " (" << size << " bytes)" << std::endl;
+        // Load MP3 prompt and decode to PCM
+        prompt_data_ = load_mp3_as_pcm(prompt_path);
+        if (!prompt_data_.empty()) {
+            std::cout << "Loaded prompt: " << prompt_path << " (" << prompt_data_.size() << " bytes PCM)" << std::endl;
         }
 
         // Allocate ring buffer for echo delay
@@ -238,6 +232,56 @@ private:
 
     // Output buffer (only accessed from record thread)
     std::vector<int16_t> out_buf_;
+
+    // Decode MP3 file to raw PCM bytes (48kHz stereo s16le)
+    static std::vector<uint8_t> load_mp3_as_pcm(const std::string &path) {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file) {
+            std::cerr << "Failed to open MP3 prompt: " << path << std::endl;
+            return {};
+        }
+        auto size = file.tellg();
+        file.seekg(0);
+        std::vector<unsigned char> mp3_data(size);
+        file.read(reinterpret_cast<char *>(mp3_data.data()), size);
+
+        hip_t hip = hip_decode_init();
+        if (!hip) {
+            std::cerr << "Failed to initialize MP3 decoder" << std::endl;
+            return {};
+        }
+
+        // Feed all MP3 data at once, then drain decoded frames one at a time
+        constexpr int kMaxSamples = 1152;
+        int16_t pcm_l[kMaxSamples], pcm_r[kMaxSamples];
+        std::vector<uint8_t> result;
+
+        // Feed entire MP3 buffer — hip buffers it internally
+        int samples = hip_decode1(hip, mp3_data.data(),
+                                  static_cast<int>(mp3_data.size()),
+                                  pcm_l, pcm_r);
+        auto append_samples = [&](int n) {
+            for (int i = 0; i < n; i++) {
+                auto l = pcm_l[i], r = pcm_r[i];
+                result.push_back(static_cast<uint8_t>(l & 0xFF));
+                result.push_back(static_cast<uint8_t>((l >> 8) & 0xFF));
+                result.push_back(static_cast<uint8_t>(r & 0xFF));
+                result.push_back(static_cast<uint8_t>((r >> 8) & 0xFF));
+            }
+        };
+
+        if (samples > 0)
+            append_samples(samples);
+
+        // Drain remaining decoded frames (pass size=0 to pull buffered data)
+        while ((samples = hip_decode1(hip, mp3_data.data(), 0,
+                                      pcm_l, pcm_r)) > 0) {
+            append_samples(samples);
+        }
+
+        hip_decode_exit(hip);
+        return result;
+    }
 };
 
 // -- Utility --
@@ -661,7 +705,7 @@ int main(int argc, char *argv[]) {
     // Defaults
     int32_t api_id = 0;
     std::string api_hash;
-    std::string prompt_file = "prompt.raw";
+    std::string prompt_file = "prompt.mp3";
     std::string recordings_dir = "recordings";
     int echo_delay_ms = 1000;
 

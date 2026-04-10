@@ -43,7 +43,7 @@ Individual targets:
 | `make` | Full build (submodules + TDLib + call_service) |
 | `make tdlib` | Build TDLib only (into `td-install/`) |
 | `make build` | Build call_service only (assumes TDLib is built) |
-| `make prompt` | Generate a test beep prompt (`prompt.raw`) |
+| `make prompt` | Generate a test beep prompt (MP3) |
 | `make run` | Build + generate prompt + run the service |
 | `make clean` | Remove build directories |
 
@@ -72,28 +72,25 @@ Tip: use a `.envrc` with [direnv](https://direnv.net/) to load them automaticall
 
 ### Prepare audio prompt
 
-The prompt must be raw PCM: 48kHz, stereo, signed 16-bit little-endian.
+The prompt must be an MP3 file. It is decoded to PCM at startup via LAME.
 
 ```bash
-# convert any audio file
-ffmpeg -i input.mp3 -f s16le -ac 2 -ar 48000 prompt.raw
+# use any MP3 file directly
+cp greeting.mp3 prompt.mp3
 
 # or generate a test beep
-ffmpeg -f lavfi -i "sine=frequency=440:duration=0.3" \
-  -f lavfi -i "anullsrc=r=48000:cl=stereo" \
-  -filter_complex "[0]aresample=48000,pan=stereo|c0=c0|c1=c0[beep];[1]atrim=0:0.7[silence];[beep][silence]concat=n=2:v=0:a=1,aloop=loop=4:size=48000[loop];[loop]aresample=48000" \
-  -t 5 -f s16le -acodec pcm_s16le -ac 2 -ar 48000 prompt.raw -y
+make prompt
 ```
 
 ### Run
 
 ```bash
-./build/call_service [--prompt prompt.raw] [--recordings-dir recordings/] [--echo-delay 1000]
+./build/call_service [--prompt prompt.mp3] [--recordings-dir recordings/] [--echo-delay 1000]
 ```
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
-| `--prompt` | — | `prompt.raw` | PCM audio prompt file |
+| `--prompt` | — | `prompt.mp3` | PCM audio prompt file |
 | `--recordings-dir` | — | `recordings/` | Directory for MP3 recordings |
 | `--echo-delay` | `ECHO_DELAY` | `1000` | Echo delay in milliseconds |
 
