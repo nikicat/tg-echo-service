@@ -1,0 +1,6 @@
+build/
+td-install/
+vendor/td/build/
+tdlib_db/
+recordings/
+.envrc

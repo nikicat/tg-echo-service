@@ -1,0 +1,31 @@
+# podman-compose creates a pod per project by default; pods own the network
+# namespace, which conflicts with per-container network_mode: pasta
+x-podman:
+  in_pod: false
+
+services:
+  auth:
+    build: .
+    network_mode: pasta
+    environment:
+      - API_ID
+      - API_HASH
+    volumes:
+      - ./tdlib_db:/app/tdlib_db
+    stdin_open: true
+    tty: true
+    profiles:
+      - auth
+
+  call-service:
+    build: .
+    network_mode: pasta
+    environment:
+      - API_ID
+      - API_HASH
+      - ECHO_DELAY
+    volumes:
+      - ./tdlib_db:/app/tdlib_db
+      - ./recordings:/app/recordings
+      # - ./prompt.mp3:/app/prompt.mp3:ro
+    restart: unless-stopped
