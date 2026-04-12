@@ -1,0 +1,5 @@
+FROM docker.io/archlinux:latest
+RUN pacman -Syu --noconfirm make ffmpeg curl && pacman -Scc --noconfirm
+COPY Makefile /Makefile
+WORKDIR /out
+ENTRYPOINT ["make", "-f", "/Makefile"]
