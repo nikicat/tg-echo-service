@@ -13,6 +13,8 @@
 
 #include <lame/lame.h>
 
+#include <csignal>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -27,6 +29,8 @@
 #include <vector>
 
 namespace td_api = td::td_api;
+
+static volatile std::sig_atomic_t g_quit = 0;
 
 // -- MP3 audio recorder (writes caller audio to file) --
 
@@ -332,7 +336,7 @@ public:
     }
 
     void run() {
-        while (!quit_) {
+        while (!quit_ && !g_quit) {
             auto response = client_manager_->receive(1.0);
             if (response.object) {
                 process_response(std::move(response));
@@ -402,6 +406,16 @@ private:
 
     // -- Auth flow --
 
+    bool read_input(const char *prompt, std::string &out) {
+        std::cout << prompt << std::flush;
+        if (!std::getline(std::cin, out)) {
+            std::cerr << "No stdin — run the auth service first (podman compose run auth)" << std::endl;
+            quit_ = true;
+            return false;
+        }
+        return true;
+    }
+
     void on_auth_state(td_api::object_ptr<td_api::AuthorizationState> state) {
         auth_query_id_++;
         auto handler = [this, expected = auth_query_id_](Object obj) {
@@ -427,23 +441,20 @@ private:
                 break;
             }
             case td_api::authorizationStateWaitPhoneNumber::ID: {
-                std::cout << "Enter phone number: " << std::flush;
                 std::string phone;
-                std::getline(std::cin, phone);
+                if (!read_input("Enter phone number: ", phone)) return;
                 send_query(td_api::make_object<td_api::setAuthenticationPhoneNumber>(phone, nullptr), handler);
                 break;
             }
             case td_api::authorizationStateWaitCode::ID: {
-                std::cout << "Enter auth code: " << std::flush;
                 std::string code;
-                std::getline(std::cin, code);
+                if (!read_input("Enter auth code: ", code)) return;
                 send_query(td_api::make_object<td_api::checkAuthenticationCode>(code), handler);
                 break;
             }
             case td_api::authorizationStateWaitPassword::ID: {
-                std::cout << "Enter 2FA password: " << std::flush;
                 std::string password;
-                std::getline(std::cin, password);
+                if (!read_input("Enter 2FA password: ", password)) return;
                 send_query(td_api::make_object<td_api::checkAuthenticationPassword>(password), handler);
                 break;
             }
@@ -752,6 +763,8 @@ int main(int argc, char *argv[]) {
     system(mkdir_cmd.c_str());
 
     CallService service(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms);
+    std::signal(SIGTERM, [](int) { g_quit = 1; });
+    std::signal(SIGINT, [](int) { g_quit = 1; });
     service.run();
     return 0;
 }
