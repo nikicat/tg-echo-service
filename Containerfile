@@ -5,14 +5,25 @@ RUN pacman -Syu --noconfirm \
     base-devel git cmake openssl opus libvpx libyuv ffmpeg zlib gperf lame
 
 WORKDIR /src
-COPY . .
 
-RUN git submodule update --init
-RUN make BUILD_TYPE=Release -j$(nproc)
+# Dep sources (cached unless vendor/stub/CMakeLists.txt change)
+COPY vendor/ vendor/
+COPY stub/ stub/
+COPY CMakeLists.txt ./
+
+# Build TDLib
+RUN cmake -B vendor/td/build -S vendor/td -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build vendor/td/build -j$(nproc) && \
+    cmake --install vendor/td/build --prefix /src/td-install
+
+# Configure and build all deps (tgcalls pulls in webrtc, absl, etc.)
+RUN touch main.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release
+RUN cmake --build build -j$(nproc) --target tgcalls
+
+# App source (only this layer rebuilds on main.cpp changes)
+COPY main.cpp .
+RUN cmake --build build -j$(nproc) --target call_service
 RUN strip -s build/call_service
-
-# Generate default prompt if not present
-RUN make prompt
 
 # Stage 2: runtime
 FROM docker.io/archlinux:latest
@@ -23,6 +34,5 @@ RUN pacman -Syu --noconfirm openssl opus libvpx libyuv ffmpeg zlib lame && \
 WORKDIR /app
 
 COPY --from=builder /src/build/call_service .
-COPY --from=builder /src/prompt.mp3 .
 
 ENTRYPOINT ["./call_service"]
