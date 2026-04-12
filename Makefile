@@ -12,7 +12,7 @@ export CMAKE_BUILD_PARALLEL_LEVEL
 
 IMAGE ?= docker.io/nikicat/tg-echo-service
 
-.PHONY: all submodules tdlib configure build clean run prompt glados-prompt image push
+.PHONY: all submodules tdlib configure build clean run prompt glados-prompt image image-tools push push-tools
 
 all: build
 
@@ -63,10 +63,16 @@ run: build prompt
 	mkdir -p recordings
 	./build/call_service
 
-image:
+image-tools:
+	podman build -t $(IMAGE)-tools -f Containerfile.tools .
+
+image: image-tools
 	podman build -t $(IMAGE) .
 
-push: image
+push-tools: image-tools
+	podman push $(IMAGE)-tools
+
+push: image push-tools
 	podman push $(IMAGE)
 
 clean:
