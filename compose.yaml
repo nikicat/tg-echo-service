@@ -17,6 +17,7 @@ x-tools: &tools
 services:
   auth:
     <<: *service
+    command: ["auth"]
     environment:
       - API_ID
       - API_HASH

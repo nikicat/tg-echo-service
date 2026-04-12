@@ -316,20 +316,21 @@ class CallService {
 public:
     CallService(int32_t api_id, const std::string &api_hash,
                 const std::string &prompt_file, const std::string &recordings_dir,
-                int echo_delay_ms = 1000)
+                int echo_delay_ms = 1000, bool auth_only = false)
         : api_id_(api_id), api_hash_(api_hash),
           prompt_file_(prompt_file), recordings_dir_(recordings_dir),
-          echo_delay_ms_(echo_delay_ms) {
+          echo_delay_ms_(echo_delay_ms), auth_only_(auth_only) {
 
-        // Register tgcalls implementations
-        tgcalls::Register<tgcalls::InstanceImpl>();
-        tgcalls::Register<tgcalls::InstanceV2Impl>();
-        tgcalls::Register<tgcalls::InstanceV2ReferenceImpl>();
+        if (!auth_only_) {
+            tgcalls::Register<tgcalls::InstanceImpl>();
+            tgcalls::Register<tgcalls::InstanceV2Impl>();
+            tgcalls::Register<tgcalls::InstanceV2ReferenceImpl>();
 
-        auto versions = tgcalls::Meta::Versions();
-        std::cout << "tgcalls versions:";
-        for (const auto &v : versions) std::cout << " " << v;
-        std::cout << std::endl;
+            auto versions = tgcalls::Meta::Versions();
+            std::cout << "tgcalls versions:";
+            for (const auto &v : versions) std::cout << " " << v;
+            std::cout << std::endl;
+        }
 
         td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(1));
         client_manager_ = std::make_unique<td::ClientManager>();
@@ -356,6 +357,7 @@ private:
     int echo_delay_ms_;
     bool quit_ = false;
     bool authorized_ = false;
+    bool auth_only_;
 
     std::unique_ptr<td::ClientManager> client_manager_;
     td::ClientManager::ClientId client_id_{0};
@@ -465,6 +467,11 @@ private:
                 break;
             }
             case td_api::authorizationStateWaitPhoneNumber::ID: {
+                if (!auth_only_) {
+                    std::cerr << "Not authenticated — run `call_service auth` first" << std::endl;
+                    quit_ = true;
+                    return;
+                }
                 std::string phone;
                 if (!read_input("Enter phone number: ", phone)) return;
                 send_query(td_api::make_object<td_api::setAuthenticationPhoneNumber>(phone, nullptr), handler);
@@ -484,7 +491,12 @@ private:
             }
             case td_api::authorizationStateReady::ID:
                 authorized_ = true;
-                std::cout << "Authorized. Waiting for incoming calls..." << std::endl;
+                if (auth_only_) {
+                    std::cout << "Authorized." << std::endl;
+                    quit_ = true;
+                } else {
+                    std::cout << "Authorized. Waiting for incoming calls..." << std::endl;
+                }
                 break;
             case td_api::authorizationStateClosed::ID:
                 std::cout << "Session closed." << std::endl;
@@ -744,6 +756,15 @@ int main(int argc, char *argv[]) {
     std::string recordings_dir = "recordings";
     int echo_delay_ms = 1000;
 
+    // Check for subcommand
+    bool auth_only = false;
+    if (argc >= 2 && std::string(argv[1]) == "auth") {
+        auth_only = true;
+        argv[1] = argv[0]; // shift args
+        argv++;
+        argc--;
+    }
+
     // Parse args
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -758,7 +779,7 @@ int main(int argc, char *argv[]) {
         } else if (arg == "--echo-delay" && i + 1 < argc) {
             echo_delay_ms = std::stoi(argv[++i]);
         } else if (arg == "--help") {
-            std::cout << "Usage: " << argv[0] << " --api-id ID --api-hash HASH [--prompt FILE] [--recordings-dir DIR] [--echo-delay MS]" << std::endl;
+            std::cout << "Usage: " << argv[0] << " [auth] [--api-id ID] [--api-hash HASH] [--prompt FILE] [--recordings-dir DIR] [--echo-delay MS]" << std::endl;
             return 0;
         }
     }
@@ -782,11 +803,12 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Ensure recordings dir exists
-    std::string mkdir_cmd = "mkdir -p " + recordings_dir;
-    system(mkdir_cmd.c_str());
+    if (!auth_only) {
+        std::string mkdir_cmd = "mkdir -p " + recordings_dir;
+        system(mkdir_cmd.c_str());
+    }
 
-    CallService service(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms);
+    CallService service(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms, auth_only);
     std::signal(SIGTERM, [](int) { g_quit = 1; });
     std::signal(SIGINT, [](int) { g_quit = 1; });
     service.run();
