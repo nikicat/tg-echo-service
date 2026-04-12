@@ -310,33 +310,22 @@ static std::string timestamp_string() {
     return std::to_string(seconds);
 }
 
-// -- Call Service --
+// -- TDLib service base class --
 
-class CallService {
+class TdService {
 public:
-    CallService(int32_t api_id, const std::string &api_hash,
-                const std::string &prompt_file, const std::string &recordings_dir,
-                int echo_delay_ms = 1000, bool auth_only = false)
-        : api_id_(api_id), api_hash_(api_hash),
-          prompt_file_(prompt_file), recordings_dir_(recordings_dir),
-          echo_delay_ms_(echo_delay_ms), auth_only_(auth_only) {
+    using Object = td_api::object_ptr<td_api::Object>;
+    using AuthHandler = std::function<void(Object)>;
 
-        if (!auth_only_) {
-            tgcalls::Register<tgcalls::InstanceImpl>();
-            tgcalls::Register<tgcalls::InstanceV2Impl>();
-            tgcalls::Register<tgcalls::InstanceV2ReferenceImpl>();
-
-            auto versions = tgcalls::Meta::Versions();
-            std::cout << "tgcalls versions:";
-            for (const auto &v : versions) std::cout << " " << v;
-            std::cout << std::endl;
-        }
-
+    TdService(int32_t api_id, const std::string &api_hash)
+        : api_id_(api_id), api_hash_(api_hash) {
         td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(1));
         client_manager_ = std::make_unique<td::ClientManager>();
         client_id_ = client_manager_->create_client_id();
         send_query(td_api::make_object<td_api::getOption>("version"), {});
     }
+
+    virtual ~TdService() = default;
 
     void run() {
         while (!quit_ && !g_quit) {
@@ -347,32 +336,8 @@ public:
         }
     }
 
-private:
-    using Object = td_api::object_ptr<td_api::Object>;
-
-    int32_t api_id_;
-    std::string api_hash_;
-    std::string prompt_file_;
-    std::string recordings_dir_;
-    int echo_delay_ms_;
+protected:
     bool quit_ = false;
-    bool authorized_ = false;
-    bool auth_only_;
-
-    std::unique_ptr<td::ClientManager> client_manager_;
-    td::ClientManager::ClientId client_id_{0};
-    uint64_t query_id_{0};
-    uint64_t auth_query_id_{0};
-    std::map<uint64_t, std::function<void(Object)>> handlers_;
-
-    // Active call state
-    int32_t active_call_id_ = 0;
-    int64_t caller_user_id_ = 0;
-    bool active_call_outgoing_ = false;
-    std::unique_ptr<tgcalls::Instance> tgcalls_instance_;
-    std::shared_ptr<EchoPlayer> echo_player_;
-    std::shared_ptr<FileRecorder> file_recorder_;
-    std::string recording_path_;
 
     void send_query(td_api::object_ptr<td_api::Function> f, std::function<void(Object)> handler) {
         auto id = ++query_id_;
@@ -380,10 +345,30 @@ private:
         client_manager_->send(client_id_, id, std::move(f));
     }
 
+    virtual void on_authorized() = 0;
+
+    virtual void on_auth_challenge(td_api::object_ptr<td_api::AuthorizationState> state, AuthHandler handler) {
+        std::cerr << "Not authenticated — run `call_service auth` first" << std::endl;
+        quit_ = true;
+    }
+
+    virtual void on_update(Object update) {}
+
+private:
+    int32_t api_id_;
+    std::string api_hash_;
+    bool authorized_ = false;
+
+    std::unique_ptr<td::ClientManager> client_manager_;
+    td::ClientManager::ClientId client_id_{0};
+    uint64_t query_id_{0};
+    uint64_t auth_query_id_{0};
+    std::map<uint64_t, std::function<void(Object)>> handlers_;
+
     void process_response(td::ClientManager::Response response) {
         if (!response.object) return;
         if (response.request_id == 0) {
-            process_update(std::move(response.object));
+            process_update_internal(std::move(response.object));
         } else {
             auto it = handlers_.find(response.request_id);
             if (it != handlers_.end()) {
@@ -393,23 +378,96 @@ private:
         }
     }
 
-    void process_update(Object update) {
-        auto id = update->get_id();
-
-        if (id == td_api::updateAuthorizationState::ID) {
+    void process_update_internal(Object update) {
+        if (update->get_id() == td_api::updateAuthorizationState::ID) {
             auto &u = static_cast<td_api::updateAuthorizationState &>(*update);
             on_auth_state(std::move(u.authorization_state_));
-        } else if (id == td_api::updateCall::ID) {
-            auto &u = static_cast<td_api::updateCall &>(*update);
-            on_call_update(std::move(u.call_));
-        } else if (id == td_api::updateNewCallSignalingData::ID) {
-            auto &u = static_cast<td_api::updateNewCallSignalingData &>(*update);
-            on_signaling_data(u.call_id_, u.data_);
+        } else {
+            on_update(std::move(update));
         }
     }
 
-    // -- Auth flow --
+    void on_auth_state(td_api::object_ptr<td_api::AuthorizationState> state) {
+        auth_query_id_++;
+        auto handler = [this, expected = auth_query_id_](Object obj) {
+            if (expected != auth_query_id_) return;
+            if (obj->get_id() == td_api::error::ID) {
+                auto &err = static_cast<td_api::error &>(*obj);
+                std::cerr << "Auth error: " << err.code_ << " " << err.message_ << std::endl;
+            }
+        };
 
+        switch (state->get_id()) {
+            case td_api::authorizationStateWaitTdlibParameters::ID: {
+                auto req = td_api::make_object<td_api::setTdlibParameters>();
+                req->database_directory_ = "tdlib_db";
+                req->use_message_database_ = false;
+                req->use_secret_chats_ = false;
+                req->api_id_ = api_id_;
+                req->api_hash_ = api_hash_;
+                req->system_language_code_ = "en";
+                req->device_model_ = "CallService";
+                req->application_version_ = "1.0";
+                send_query(std::move(req), handler);
+                break;
+            }
+            case td_api::authorizationStateWaitPhoneNumber::ID:
+            case td_api::authorizationStateWaitCode::ID:
+            case td_api::authorizationStateWaitPassword::ID:
+                on_auth_challenge(std::move(state), handler);
+                break;
+            case td_api::authorizationStateReady::ID:
+                authorized_ = true;
+                on_authorized();
+                break;
+            case td_api::authorizationStateClosed::ID:
+                std::cout << "Session closed." << std::endl;
+                quit_ = true;
+                break;
+            default:
+                break;
+        }
+    }
+};
+
+// -- Auth service: interactive auth, exits after success --
+
+class AuthService : public TdService {
+public:
+    using TdService::TdService;
+
+protected:
+    void on_authorized() override {
+        std::cout << "Authorized." << std::endl;
+        quit_ = true;
+    }
+
+    void on_auth_challenge(td_api::object_ptr<td_api::AuthorizationState> state, AuthHandler handler) override {
+        switch (state->get_id()) {
+            case td_api::authorizationStateWaitPhoneNumber::ID: {
+                std::string phone;
+                if (!read_input("Enter phone number: ", phone)) return;
+                send_query(td_api::make_object<td_api::setAuthenticationPhoneNumber>(phone, nullptr), handler);
+                break;
+            }
+            case td_api::authorizationStateWaitCode::ID: {
+                std::string code;
+                if (!read_input("Enter auth code: ", code)) return;
+                send_query(td_api::make_object<td_api::checkAuthenticationCode>(code), handler);
+                break;
+            }
+            case td_api::authorizationStateWaitPassword::ID: {
+                std::string password;
+                if (!read_password("Enter 2FA password: ", password)) return;
+                send_query(td_api::make_object<td_api::checkAuthenticationPassword>(password), handler);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+private:
     bool read_input(const char *prompt, std::string &out) {
         std::cout << prompt << std::flush;
         if (!std::getline(std::cin, out)) {
@@ -441,73 +499,58 @@ private:
         }
         return ok;
     }
+};
 
-    void on_auth_state(td_api::object_ptr<td_api::AuthorizationState> state) {
-        auth_query_id_++;
-        auto handler = [this, expected = auth_query_id_](Object obj) {
-            if (expected != auth_query_id_) return;
-            if (obj->get_id() == td_api::error::ID) {
-                auto &err = static_cast<td_api::error &>(*obj);
-                std::cerr << "Auth error: " << err.code_ << " " << err.message_ << std::endl;
-            }
-        };
+// -- Call service: accepts calls, plays prompt, echoes audio, records --
 
-        switch (state->get_id()) {
-            case td_api::authorizationStateWaitTdlibParameters::ID: {
-                auto req = td_api::make_object<td_api::setTdlibParameters>();
-                req->database_directory_ = "tdlib_db";
-                req->use_message_database_ = false;
-                req->use_secret_chats_ = false;
-                req->api_id_ = api_id_;
-                req->api_hash_ = api_hash_;
-                req->system_language_code_ = "en";
-                req->device_model_ = "CallService";
-                req->application_version_ = "1.0";
-                send_query(std::move(req), handler);
-                break;
-            }
-            case td_api::authorizationStateWaitPhoneNumber::ID: {
-                if (!auth_only_) {
-                    std::cerr << "Not authenticated — run `call_service auth` first" << std::endl;
-                    quit_ = true;
-                    return;
-                }
-                std::string phone;
-                if (!read_input("Enter phone number: ", phone)) return;
-                send_query(td_api::make_object<td_api::setAuthenticationPhoneNumber>(phone, nullptr), handler);
-                break;
-            }
-            case td_api::authorizationStateWaitCode::ID: {
-                std::string code;
-                if (!read_input("Enter auth code: ", code)) return;
-                send_query(td_api::make_object<td_api::checkAuthenticationCode>(code), handler);
-                break;
-            }
-            case td_api::authorizationStateWaitPassword::ID: {
-                std::string password;
-                if (!read_password("Enter 2FA password: ", password)) return;
-                send_query(td_api::make_object<td_api::checkAuthenticationPassword>(password), handler);
-                break;
-            }
-            case td_api::authorizationStateReady::ID:
-                authorized_ = true;
-                if (auth_only_) {
-                    std::cout << "Authorized." << std::endl;
-                    quit_ = true;
-                } else {
-                    std::cout << "Authorized. Waiting for incoming calls..." << std::endl;
-                }
-                break;
-            case td_api::authorizationStateClosed::ID:
-                std::cout << "Session closed." << std::endl;
-                quit_ = true;
-                break;
-            default:
-                break;
+class CallService : public TdService {
+public:
+    CallService(int32_t api_id, const std::string &api_hash,
+                const std::string &prompt_file, const std::string &recordings_dir,
+                int echo_delay_ms = 1000)
+        : TdService(api_id, api_hash),
+          prompt_file_(prompt_file), recordings_dir_(recordings_dir),
+          echo_delay_ms_(echo_delay_ms) {
+
+        tgcalls::Register<tgcalls::InstanceImpl>();
+        tgcalls::Register<tgcalls::InstanceV2Impl>();
+        tgcalls::Register<tgcalls::InstanceV2ReferenceImpl>();
+
+        auto versions = tgcalls::Meta::Versions();
+        std::cout << "tgcalls versions:";
+        for (const auto &v : versions) std::cout << " " << v;
+        std::cout << std::endl;
+    }
+
+protected:
+    void on_authorized() override {
+        std::cout << "Authorized. Waiting for incoming calls..." << std::endl;
+    }
+
+    void on_update(Object update) override {
+        auto id = update->get_id();
+        if (id == td_api::updateCall::ID) {
+            auto &u = static_cast<td_api::updateCall &>(*update);
+            on_call_update(std::move(u.call_));
+        } else if (id == td_api::updateNewCallSignalingData::ID) {
+            auto &u = static_cast<td_api::updateNewCallSignalingData &>(*update);
+            on_signaling_data(u.call_id_, u.data_);
         }
     }
 
-    // -- Call handling --
+private:
+    std::string prompt_file_;
+    std::string recordings_dir_;
+    int echo_delay_ms_;
+
+    // Active call state
+    int32_t active_call_id_ = 0;
+    int64_t caller_user_id_ = 0;
+    bool active_call_outgoing_ = false;
+    std::unique_ptr<tgcalls::Instance> tgcalls_instance_;
+    std::shared_ptr<EchoPlayer> echo_player_;
+    std::shared_ptr<FileRecorder> file_recorder_;
+    std::string recording_path_;
 
     void on_call_update(td_api::object_ptr<td_api::call> call) {
         auto call_id = call->id_;
@@ -757,10 +800,9 @@ int main(int argc, char *argv[]) {
     int echo_delay_ms = 1000;
 
     // Check for subcommand
-    bool auth_only = false;
-    if (argc >= 2 && std::string(argv[1]) == "auth") {
-        auth_only = true;
-        argv[1] = argv[0]; // shift args
+    bool auth_mode = argc >= 2 && std::string(argv[1]) == "auth";
+    if (auth_mode) {
+        argv[1] = argv[0];
         argv++;
         argc--;
     }
@@ -803,14 +845,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (!auth_only) {
-        std::string mkdir_cmd = "mkdir -p " + recordings_dir;
-        system(mkdir_cmd.c_str());
+    std::unique_ptr<TdService> service;
+    if (auth_mode) {
+        service = std::make_unique<AuthService>(api_id, api_hash);
+    } else {
+        system(("mkdir -p " + recordings_dir).c_str());
+        service = std::make_unique<CallService>(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms);
     }
 
-    CallService service(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms, auth_only);
     std::signal(SIGTERM, [](int) { g_quit = 1; });
     std::signal(SIGINT, [](int) { g_quit = 1; });
-    service.run();
+    service->run();
     return 0;
 }
