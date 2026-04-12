@@ -14,6 +14,8 @@
 #include <lame/lame.h>
 
 #include <csignal>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -416,6 +418,28 @@ private:
         return true;
     }
 
+    bool read_password(const char *prompt, std::string &out) {
+        std::cout << prompt << std::flush;
+        termios oldt{};
+        bool is_tty = isatty(STDIN_FILENO);
+        if (is_tty) {
+            tcgetattr(STDIN_FILENO, &oldt);
+            termios newt = oldt;
+            newt.c_lflag &= ~ECHO;
+            tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+        }
+        bool ok = !!std::getline(std::cin, out);
+        if (is_tty) {
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+            std::cout << std::endl;
+        }
+        if (!ok) {
+            std::cerr << "No stdin — run the auth service first (podman compose run auth)" << std::endl;
+            quit_ = true;
+        }
+        return ok;
+    }
+
     void on_auth_state(td_api::object_ptr<td_api::AuthorizationState> state) {
         auth_query_id_++;
         auto handler = [this, expected = auth_query_id_](Object obj) {
@@ -454,7 +478,7 @@ private:
             }
             case td_api::authorizationStateWaitPassword::ID: {
                 std::string password;
-                if (!read_input("Enter 2FA password: ", password)) return;
+                if (!read_password("Enter 2FA password: ", password)) return;
                 send_query(td_api::make_object<td_api::checkAuthenticationPassword>(password), handler);
                 break;
             }
