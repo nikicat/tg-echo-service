@@ -118,6 +118,47 @@ Play back:
 ffplay recordings/recording_*.mp3
 ```
 
+## Running with Podman Compose
+
+No build toolchain required — uses a pre-built image from Docker Hub.
+
+### Quick start
+
+```bash
+export API_ID=12345
+export API_HASH=abcdef1234567890
+
+# Generate a prompt (first time only)
+podman compose --profile tools run --rm prompt
+# or with GLaDOS voice:
+podman compose --profile tools run --rm glados-prompt
+
+# Authenticate with Telegram (first time only, interactive)
+podman compose --profile auth run --rm auth
+
+# Start the service
+podman compose up -d call-service
+```
+
+### Building the image locally
+
+```bash
+make image                  # builds docker.io/nikicat/tg-echo-service
+make push                   # builds and pushes to Docker Hub
+make image IMAGE=foo/bar    # custom image name
+```
+
+### Compose services
+
+| Service | Profile | Description |
+|---------|---------|-------------|
+| `call-service` | *(default)* | Long-running echo service |
+| `auth` | `auth` | Interactive TDLib authentication |
+| `prompt` | `tools` | Generate beep prompt via ffmpeg |
+| `glados-prompt` | `tools` | Generate prompt via GLaDOS TTS |
+
+Session data (`tdlib_db/`), recordings, and `prompt.mp3` are bind-mounted from the project directory.
+
 ## How it works
 
 1. TDLib receives `updateCall` with `callStatePending` (incoming call)
