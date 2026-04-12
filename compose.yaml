@@ -5,13 +5,10 @@ x-podman:
 
 x-service: &service
   image: docker.io/nikicat/tg-echo-service
-  build: .
   network_mode: pasta
 
 x-tools: &tools
   image: docker.io/nikicat/tg-echo-service-tools
-  build:
-    dockerfile: Containerfile.tools
   volumes:
     - ./:/out
   profiles:
