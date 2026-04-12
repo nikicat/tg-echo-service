@@ -10,7 +10,9 @@ else
 endif
 export CMAKE_BUILD_PARALLEL_LEVEL
 
-.PHONY: all submodules tdlib configure build clean run prompt glados-prompt
+IMAGE ?= docker.io/nikicat/tg-echo-service
+
+.PHONY: all submodules tdlib configure build clean run prompt glados-prompt image push
 
 all: build
 
@@ -60,6 +62,12 @@ glados-prompt:
 run: build prompt
 	mkdir -p recordings
 	./build/call_service
+
+image:
+	podman build -t $(IMAGE) .
+
+push: image
+	podman push $(IMAGE)
 
 clean:
 	rm -rf build vendor/td/build
