@@ -18,8 +18,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -153,9 +155,12 @@ public:
         std::cout << "Echo delay: " << delay_ms << " ms (" << delay_frames_ << " frames)" << std::endl;
     }
 
+    void set_enabled(bool enabled) { enabled_.store(enabled); }
+
     // Renderer: receives caller's audio (render thread)
     bool Render(const tgcalls::AudioFrame &frame) override {
-        // Always record to MP3
+        if (!enabled_.load()) return true;
+
         if (file_recorder_)
             file_recorder_->Render(frame);
 
@@ -179,6 +184,11 @@ public:
         frame.bytes_per_sample = sizeof(int16_t);
         frame.num_channels = kChannels;
         frame.samples_per_sec = 48000;
+
+        if (!enabled_.load()) {
+            std::memset(out_buf_.data(), 0, kFrameInt16s * sizeof(int16_t));
+            return frame;
+        }
 
         // Phase 1: play prompt once
         if (!prompt_done_) {
@@ -238,6 +248,8 @@ private:
 
     // Output buffer (only accessed from record thread)
     std::vector<int16_t> out_buf_;
+
+    std::atomic<bool> enabled_{false};
 
     // Decode MP3 file to raw PCM bytes (48kHz stereo s16le)
     static std::vector<uint8_t> load_mp3_as_pcm(const std::string &path) {
@@ -524,6 +536,8 @@ public:
 
 protected:
     void on_authorized() override {
+        send_query(td_api::make_object<td_api::setOption>(
+            "online", td_api::make_object<td_api::optionValueBoolean>(true)), {});
         std::cout << "Authorized. Waiting for incoming calls..." << std::endl;
     }
 
@@ -535,6 +549,17 @@ protected:
         } else if (id == td_api::updateNewCallSignalingData::ID) {
             auto &u = static_cast<td_api::updateNewCallSignalingData &>(*update);
             on_signaling_data(u.call_id_, u.data_);
+        } else if (id == td_api::updateConnectionState::ID) {
+            auto &u = static_cast<td_api::updateConnectionState &>(*update);
+            const char *name = "unknown";
+            switch (u.state_->get_id()) {
+                case td_api::connectionStateWaitingForNetwork::ID: name = "WaitingForNetwork"; break;
+                case td_api::connectionStateConnectingToProxy::ID: name = "ConnectingToProxy"; break;
+                case td_api::connectionStateConnecting::ID: name = "Connecting"; break;
+                case td_api::connectionStateUpdating::ID: name = "Updating"; break;
+                case td_api::connectionStateReady::ID: name = "Ready"; break;
+            }
+            std::cout << "connection state: " << name << std::endl;
         }
     }
 
@@ -548,6 +573,8 @@ private:
     int64_t caller_user_id_ = 0;
     bool active_call_outgoing_ = false;
     std::unique_ptr<tgcalls::Instance> tgcalls_instance_;
+    tgcalls::State tgcalls_state_ = tgcalls::State::WaitInit;
+    bool voice_established_ = false;
     std::shared_ptr<EchoPlayer> echo_player_;
     std::shared_ptr<FileRecorder> file_recorder_;
     std::string recording_path_;
@@ -714,9 +741,19 @@ private:
             .initialNetworkType = tgcalls::NetworkType::WiFi,
             .encryptionKey = tgcalls::EncryptionKey(std::move(key), is_outgoing),
             .videoCapture = nullptr,
-            .stateUpdated = [this](tgcalls::State state) {
+            .stateUpdated = [this, call_id](tgcalls::State state) {
                 const char *names[] = {"WaitInit", "WaitInitAck", "Established", "Failed", "Reconnecting"};
+                if (state == tgcalls_state_) return;
+                tgcalls_state_ = state;
                 std::cout << "tgcalls state: " << names[static_cast<int>(state)] << std::endl;
+                if (state == tgcalls::State::Established) {
+                    voice_established_ = true;
+                    if (echo_player_) echo_player_->set_enabled(true);
+                } else if (state == tgcalls::State::Failed) {
+                    if (echo_player_) echo_player_->set_enabled(false);
+                    std::cout << "tgcalls failed — discarding call #" << call_id << std::endl;
+                    send_query(td_api::make_object<td_api::discardCall>(call_id, true, "", 0, false, 0), {});
+                }
             },
             .signalingDataEmitted = [this, call_id](const std::vector<uint8_t> &data) {
                 std::string bytes(data.begin(), data.end());
@@ -747,13 +784,17 @@ private:
             tgcalls_instance_->stop([](tgcalls::FinalState) {});
             tgcalls_instance_.reset();
         }
+        tgcalls_state_ = tgcalls::State::WaitInit;
         echo_player_.reset();
         file_recorder_.reset();
 
-        // Send recording as voice message to the caller
-        if (caller_user_id_ != 0 && !recording_path_.empty()) {
+        if (caller_user_id_ != 0 && !recording_path_.empty() && voice_established_) {
             send_voice_message(caller_user_id_, recording_path_);
+        } else if (!recording_path_.empty()) {
+            std::cout << "Voice never established — discarding recording " << recording_path_ << std::endl;
+            std::remove(recording_path_.c_str());
         }
+        voice_established_ = false;
 
         active_call_id_ = 0;
         caller_user_id_ = 0;
