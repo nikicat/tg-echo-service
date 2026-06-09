@@ -66,7 +66,7 @@ run: build prompt
 image-tools:
 	podman build -t $(IMAGE)-tools -f Containerfile.tools .
 
-image: image-tools
+image: image-tools submodules
 	podman build -t $(IMAGE) .
 
 push-tools: image-tools
