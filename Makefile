@@ -12,7 +12,7 @@ export CMAKE_BUILD_PARALLEL_LEVEL
 
 IMAGE ?= docker.io/nikicat/tg-echo-service
 
-.PHONY: all submodules tdlib configure build clean run prompt glados-prompt image image-tools push push-tools
+.PHONY: all submodules tdlib configure build clean run run-only prompt glados-prompt image image-tools push push-tools
 
 all: build
 
@@ -60,6 +60,11 @@ glados-prompt:
 
 # Run the service (requires API_ID and API_HASH env vars)
 run: build prompt
+	mkdir -p recordings
+	./build/call_service
+
+# Run the already-built binary, skipping the build/prompt prerequisites
+run-only:
 	mkdir -p recordings
 	./build/call_service
 
