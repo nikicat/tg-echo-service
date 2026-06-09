@@ -119,6 +119,8 @@ target_compile_options(usrsctp PRIVATE
   "SHELL:-include stdint.h" "SHELL:-include stddef.h")
 target_compile_options(srtp PRIVATE
   "SHELL:-include stdint.h" "SHELL:-include stddef.h")
+target_compile_options(json11 PRIVATE
+  "SHELL:-include stdint.h" "SHELL:-include stddef.h")
 
 # -- Build tgcalls (modified from BuildTgCalls.cmake) --
 # Excluded: legacy (needs libtgvoip), group (needs ffmpeg), desktop_capturer (needs X11)
@@ -188,6 +190,8 @@ target_compile_options(tgcalls PUBLIC
   -fexceptions
   -fno-math-errno
   -Wno-error
+  # Force-include for GCC 15 compat (headers use uint*_t without <cstdint>)
+  "SHELL:-include cstdint" "SHELL:-include cstddef"
 )
 
 target_link_libraries(tgcalls PUBLIC
