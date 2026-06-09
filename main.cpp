@@ -538,6 +538,28 @@ protected:
     void on_authorized() override {
         send_query(td_api::make_object<td_api::setOption>(
             "online", td_api::make_object<td_api::optionValueBoolean>(true)), {});
+        send_query(td_api::make_object<td_api::getMe>(), [](Object obj) {
+            if (obj->get_id() == td_api::error::ID) {
+                auto &err = static_cast<td_api::error &>(*obj);
+                std::cerr << "getMe failed: " << err.code_ << " " << err.message_ << std::endl;
+                return;
+            }
+            auto &user = static_cast<td_api::user &>(*obj);
+            std::string name = user.first_name_;
+            if (!user.last_name_.empty()) name += " " + user.last_name_;
+            std::string handle;
+            if (user.usernames_) {
+                if (!user.usernames_->editable_username_.empty()) {
+                    handle = user.usernames_->editable_username_;
+                } else if (!user.usernames_->active_usernames_.empty()) {
+                    handle = user.usernames_->active_usernames_.front();
+                }
+            }
+            std::cout << "Logged in as " << name << " (id=" << user.id_;
+            if (!handle.empty()) std::cout << ", @" << handle;
+            if (!user.phone_number_.empty()) std::cout << ", +" << user.phone_number_;
+            std::cout << ")" << std::endl;
+        });
         std::cout << "Authorized. Waiting for incoming calls..." << std::endl;
     }
 
