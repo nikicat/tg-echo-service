@@ -10,7 +10,14 @@
 #include "tgcalls/v2/InstanceV2Impl.h"
 #include "tgcalls/v2/InstanceV2ReferenceImpl.h"
 #include "tgcalls/FakeAudioDeviceModule.h"
+#include "tgcalls/StaticThreads.h"
+#include "tgcalls/VideoCaptureInterface.h"
 
+#include "api/video/i420_buffer.h"
+#include "api/video/video_frame.h"
+#include "api/video/video_sink_interface.h"
+
+#include <libyuv.h>
 #include <lame/lame.h>
 
 #include <csignal>
@@ -124,6 +131,77 @@ private:
     int num_channels_;
     std::vector<unsigned char> mp3_buffer_;
     size_t total_bytes_ = 0;
+};
+
+// -- Y4M video recorder: writes the caller's incoming video to a .y4m file --
+//
+// Incoming frames arrive already decoded as I420. We lock onto the first frame's
+// resolution and scale any differently-sized frames to match (WebRTC may change the
+// resolution mid-call). Output is raw YUV4MPEG2 — no muxer needed; plays in ffmpeg/mpv.
+// The file is created lazily on the first frame, so a call with no incoming video
+// leaves no file behind.
+class VideoRecorder : public rtc::VideoSinkInterface<webrtc::VideoFrame> {
+public:
+    explicit VideoRecorder(const std::string &path) : path_(path) {}
+
+    void OnFrame(const webrtc::VideoFrame &frame) override {
+        auto i420 = frame.video_frame_buffer()->ToI420();
+        if (!i420)
+            return;
+
+        if (!file_.is_open()) {
+            width_ = i420->width();
+            height_ = i420->height();
+            file_.open(path_, std::ios::binary);
+            if (!file_) {
+                std::cerr << "Failed to open video recording file: " << path_ << std::endl;
+                return;
+            }
+            // Stream header. Nominal 30fps (F30:1) — the real incoming rate varies.
+            file_ << "YUV4MPEG2 W" << width_ << " H" << height_ << " F30:1 Ip A1:1 C420\n";
+        }
+        if (!file_)
+            return;
+
+        // Scale to the locked resolution if this frame differs.
+        webrtc::scoped_refptr<webrtc::I420BufferInterface> out = i420;
+        if (i420->width() != width_ || i420->height() != height_) {
+            auto scaled = webrtc::I420Buffer::Create(width_, height_);
+            libyuv::I420Scale(
+                i420->DataY(), i420->StrideY(), i420->DataU(), i420->StrideU(),
+                i420->DataV(), i420->StrideV(), i420->width(), i420->height(),
+                scaled->MutableDataY(), scaled->StrideY(), scaled->MutableDataU(), scaled->StrideU(),
+                scaled->MutableDataV(), scaled->StrideV(), width_, height_,
+                libyuv::kFilterBilinear);
+            out = scaled;
+        }
+
+        file_ << "FRAME\n";
+        write_plane(out->DataY(), out->StrideY(), width_, height_);
+        write_plane(out->DataU(), out->StrideU(), (width_ + 1) / 2, (height_ + 1) / 2);
+        write_plane(out->DataV(), out->StrideV(), (width_ + 1) / 2, (height_ + 1) / 2);
+        frames_++;
+    }
+
+    ~VideoRecorder() override {
+        if (file_.is_open()) {
+            file_.close();
+            std::cout << "Video recording saved: " << path_ << " (" << frames_ << " frames, "
+                      << width_ << "x" << height_ << ")" << std::endl;
+        }
+    }
+
+private:
+    void write_plane(const uint8_t *data, int stride, int w, int h) {
+        for (int row = 0; row < h; row++)
+            file_.write(reinterpret_cast<const char *>(data + row * stride), w);
+    }
+
+    std::string path_;
+    std::ofstream file_;
+    int width_ = 0;
+    int height_ = 0;
+    uint64_t frames_ = 0;
 };
 
 // -- Echo player: plays prompt once, then echoes caller audio with delay --
@@ -519,10 +597,10 @@ class CallService : public TdService {
 public:
     CallService(int32_t api_id, const std::string &api_hash,
                 const std::string &prompt_file, const std::string &recordings_dir,
-                int echo_delay_ms = 1000)
+                int echo_delay_ms = 1000, bool video_enabled = true)
         : TdService(api_id, api_hash),
           prompt_file_(prompt_file), recordings_dir_(recordings_dir),
-          echo_delay_ms_(echo_delay_ms) {
+          echo_delay_ms_(echo_delay_ms), video_enabled_(video_enabled) {
 
         tgcalls::Register<tgcalls::InstanceImpl>();
         tgcalls::Register<tgcalls::InstanceV2Impl>();
@@ -589,6 +667,7 @@ private:
     std::string prompt_file_;
     std::string recordings_dir_;
     int echo_delay_ms_;
+    bool video_enabled_;
 
     // Active call state
     int32_t active_call_id_ = 0;
@@ -600,6 +679,9 @@ private:
     std::shared_ptr<EchoPlayer> echo_player_;
     std::shared_ptr<FileRecorder> file_recorder_;
     std::string recording_path_;
+    std::shared_ptr<tgcalls::VideoCaptureInterface> video_capture_;
+    std::shared_ptr<VideoRecorder> video_recorder_;
+    std::string video_recording_path_;
 
     void on_call_update(td_api::object_ptr<td_api::call> call) {
         auto call_id = call->id_;
@@ -733,9 +815,19 @@ private:
         }
 
         // Audio: echo player + MP3 recorder
-        recording_path_ = recordings_dir_ + "/recording_" + timestamp_string() + ".mp3";
+        std::string ts = timestamp_string();
+        recording_path_ = recordings_dir_ + "/recording_" + ts + ".mp3";
         file_recorder_ = std::make_shared<FileRecorder>(recording_path_);
         echo_player_ = std::make_shared<EchoPlayer>(prompt_file_, echo_delay_ms_, file_recorder_);
+
+        // Video: animated outgoing prompt (sent for the whole call) + incoming recorder.
+        // The capture's source self-feeds a looping animation; the recorder is attached
+        // to the instance below via setIncomingVideoOutput().
+        if (video_enabled_) {
+            video_capture_ = tgcalls::VideoCaptureInterface::Create(tgcalls::StaticThreads::getThreads());
+            video_recording_path_ = recordings_dir_ + "/recording_" + ts + ".y4m";
+            video_recorder_ = std::make_shared<VideoRecorder>(video_recording_path_);
+        }
 
         int max_layer = ready.protocol_ ? ready.protocol_->max_layer_ : 92;
 
@@ -762,7 +854,7 @@ private:
             .rtcServers = std::move(rtc_servers),
             .initialNetworkType = tgcalls::NetworkType::WiFi,
             .encryptionKey = tgcalls::EncryptionKey(std::move(key), is_outgoing),
-            .videoCapture = nullptr,
+            .videoCapture = video_capture_,
             .stateUpdated = [this, call_id](tgcalls::State state) {
                 const char *names[] = {"WaitInit", "WaitInitAck", "Established", "Failed", "Reconnecting"};
                 if (state == tgcalls_state_) return;
@@ -795,6 +887,8 @@ private:
         if (tgcalls_instance_) {
             tgcalls_instance_->setNetworkType(tgcalls::NetworkType::WiFi);
             tgcalls_instance_->setMuteMicrophone(false);
+            if (video_recorder_)
+                tgcalls_instance_->setIncomingVideoOutput(video_recorder_);
             std::cout << "tgcalls instance created" << std::endl;
         } else {
             std::cerr << "Failed to create tgcalls instance for version: " << version << std::endl;
@@ -809,6 +903,9 @@ private:
         tgcalls_state_ = tgcalls::State::WaitInit;
         echo_player_.reset();
         file_recorder_.reset();
+        video_capture_.reset();   // stops the animation thread
+        video_recorder_.reset();  // flushes + closes the .y4m file (logs if any frames)
+        video_recording_path_.clear();
 
         if (caller_user_id_ != 0 && !recording_path_.empty() && voice_established_) {
             send_voice_message(caller_user_id_, recording_path_);
@@ -861,6 +958,7 @@ int main(int argc, char *argv[]) {
     std::string prompt_file = "prompt.mp3";
     std::string recordings_dir = "recordings";
     int echo_delay_ms = 1000;
+    bool video_enabled = true;
 
     // Check for subcommand
     bool auth_mode = argc >= 2 && std::string(argv[1]) == "auth";
@@ -883,8 +981,12 @@ int main(int argc, char *argv[]) {
             recordings_dir = argv[++i];
         } else if (arg == "--echo-delay" && i + 1 < argc) {
             echo_delay_ms = std::stoi(argv[++i]);
+        } else if (arg == "--video") {
+            video_enabled = true;
+        } else if (arg == "--no-video") {
+            video_enabled = false;
         } else if (arg == "--help") {
-            std::cout << "Usage: " << argv[0] << " [auth] [--api-id ID] [--api-hash HASH] [--prompt FILE] [--recordings-dir DIR] [--echo-delay MS]" << std::endl;
+            std::cout << "Usage: " << argv[0] << " [auth] [--api-id ID] [--api-hash HASH] [--prompt FILE] [--recordings-dir DIR] [--echo-delay MS] [--video|--no-video]" << std::endl;
             return 0;
         }
     }
@@ -902,6 +1004,10 @@ int main(int argc, char *argv[]) {
         const char *env = std::getenv("ECHO_DELAY");
         if (env) echo_delay_ms = std::stoi(env);
     }
+    {
+        const char *env = std::getenv("VIDEO");
+        if (env) video_enabled = !(std::string(env) == "0" || std::string(env) == "false");
+    }
 
     if (api_id == 0 || api_hash.empty()) {
         std::cerr << "API_ID and API_HASH required (via --api-id/--api-hash or env vars)" << std::endl;
@@ -913,7 +1019,7 @@ int main(int argc, char *argv[]) {
         service = std::make_unique<AuthService>(api_id, api_hash);
     } else {
         system(("mkdir -p " + recordings_dir).c_str());
-        service = std::make_unique<CallService>(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms);
+        service = std::make_unique<CallService>(api_id, api_hash, prompt_file, recordings_dir, echo_delay_ms, video_enabled);
     }
 
     std::signal(SIGTERM, [](int) { g_quit = 1; });

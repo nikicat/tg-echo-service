@@ -131,8 +131,9 @@ set(TGCALLS_DIR "${TGCALLS_DEPS_DIR}/tgcalls")
 add_library(tgcalls STATIC
   "${TGCALLS_DIR}/tgcalls/utils/gzip.cpp"
 
-  # Platform: fake (no video, no hardware audio)
-  "${TGCALLS_DIR}/tgcalls/platform/fake/FakeInterface.cpp"
+  # Platform: custom (animated outgoing video + H264/VP8 encoding).
+  # Replaces tgcalls/platform/fake/FakeInterface.cpp, which stubs out all video.
+  "${CMAKE_SOURCE_DIR}/video_platform.cpp"
 
   # Core
   "${TGCALLS_DIR}/tgcalls/Manager.cpp"
@@ -215,6 +216,7 @@ target_link_libraries(call_service PRIVATE
   tgcalls
   Td::TdStatic
   mp3lame
+  yuv  # libyuv: I420 scaling for incoming-video recording (brings its include dir)
 )
 
 target_include_directories(call_service PRIVATE
