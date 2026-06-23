@@ -4,11 +4,11 @@ x-podman:
   in_pod: false
 
 x-service: &service
-  image: docker.io/nikicat/tg-echo-service
+  image: docker.io/nikicat/tg-echo
   network_mode: pasta
 
 x-tools: &tools
-  image: docker.io/nikicat/tg-echo-service-tools
+  image: docker.io/nikicat/tg-echo-tools
   volumes:
     - ./:/out
   profiles:
@@ -38,7 +38,7 @@ services:
     network_mode: pasta
     command: ["glados-prompt"]
 
-  call-service:
+  tg-echo:
     <<: *service
     environment:
       - API_ID

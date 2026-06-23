@@ -48,8 +48,8 @@ RUN cmake --build build -j$(nproc) --target tgcalls
 
 # App source (only this layer rebuilds on main.cpp changes)
 COPY main.cpp .
-RUN cmake --build build -j$(nproc) --target call_service
-RUN strip -s build/call_service
+RUN cmake --build build -j$(nproc) --target tg-echo
+RUN strip -s build/tg-echo
 
 # Collect the binary's shared-library closure (minus the glibc core the runtime
 # base already ships) into a flat dir. The runtime stage drops these into
@@ -58,7 +58,7 @@ RUN strip -s build/call_service
 # would clobber, breaking the dynamic linker. This keeps the runtime minimal
 # without hand-listing version-suffixed Debian packages, identically on amd64/arm64.
 RUN mkdir -p /rootfs && \
-    ldd build/call_service | awk '/=> \//{print $3}' | sort -u | \
+    ldd build/tg-echo | awk '/=> \//{print $3}' | sort -u | \
     grep -vE '/(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libgcc_s)\.so' | \
     xargs -I{} cp -L {} /rootfs/
 
@@ -76,6 +76,6 @@ WORKDIR /app
 # libs (and their soname links) without touching system lib dirs.
 COPY --from=builder /rootfs/ /usr/local/lib/
 RUN ldconfig
-COPY --from=builder /src/build/call_service .
+COPY --from=builder /src/build/tg-echo .
 
-ENTRYPOINT ["./call_service"]
+ENTRYPOINT ["./tg-echo"]

@@ -1,30 +1,30 @@
-# Quadlet unit for the Telegram echo call service (rootless podman + systemd).
+# Quadlet unit for Telegram Echo (rootless podman + systemd).
 #
-# Install to:  ~/.config/containers/systemd/tg-call-service.container
-# Then:        systemctl --user daemon-reload && systemctl --user start tg-call-service
+# Install to:  ~/.config/containers/systemd/tg-echo.container
+# Then:        systemctl --user daemon-reload && systemctl --user start tg-echo
 #
 # See deploy/README.md for full setup (credentials, prompt, one-time auth, linger).
 # Requires podman >= 4.4 (Quadlet).
 
 [Unit]
-Description=Telegram echo call service
+Description=Telegram Echo call-test service
 After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=ghcr.io/nikicat/tg-echo-service:latest
+Image=ghcr.io/nikicat/tg-echo:latest
 # Pull a newer :latest on `podman auto-update` (enable the timer; see README).
 AutoUpdate=registry
 
 # API_ID, API_HASH and optional ECHO_DELAY.
-EnvironmentFile=%h/.config/tg-call-service/tg-call-service.env
+EnvironmentFile=%h/.config/tg-echo/tg-echo.env
 
 # Persistent TDLib session DB — created by the one-time `auth` run (see README).
-Volume=%h/.local/share/tg-call-service/tdlib_db:/app/tdlib_db:Z
+Volume=%h/.local/share/tg-echo/tdlib_db:/app/tdlib_db:Z
 # Recorded voice messages, written after each call.
-Volume=%h/.local/share/tg-call-service/recordings:/app/recordings:Z
+Volume=%h/.local/share/tg-echo/recordings:/app/recordings:Z
 # Audio prompt played to callers (provide your own 48 kHz stereo MP3).
-Volume=%h/.local/share/tg-call-service/prompt.mp3:/app/prompt.mp3:ro,Z
+Volume=%h/.local/share/tg-echo/prompt.mp3:/app/prompt.mp3:ro,Z
 
 # Rootless networking; the service only makes outbound connections (no ports).
 Network=pasta

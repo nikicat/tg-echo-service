@@ -1,4 +1,4 @@
-// Telegram Call Service — accepts incoming calls, plays prompt, echoes caller audio, records to MP3
+// Telegram Echo — accepts incoming calls, plays prompt, echoes caller audio, records to MP3
 // Uses TDLib for signaling + tgcalls for audio
 
 #include <td/telegram/Client.h>
@@ -438,7 +438,7 @@ protected:
     virtual void on_authorized() = 0;
 
     virtual void on_auth_challenge(td_api::object_ptr<td_api::AuthorizationState> state, AuthHandler handler) {
-        std::cerr << "Not authenticated — run `call_service auth` first" << std::endl;
+        std::cerr << "Not authenticated — run `tg-echo auth` first" << std::endl;
         quit_ = true;
     }
 
