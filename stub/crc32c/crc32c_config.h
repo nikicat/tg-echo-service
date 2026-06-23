@@ -17,6 +17,9 @@
 #endif
 
 #define HAVE_STRONG_GETAUXVAL 1
-#define HAVE_WEAK_GETAUXVAL
+// Must have a value: crc32c_arm64_check.h tests it arithmetically as
+// `#if (HAVE_STRONG_GETAUXVAL || HAVE_WEAK_GETAUXVAL)`, so an empty define
+// expands to a dangling `||`. glibc provides the strong getauxval anyway.
+#define HAVE_WEAK_GETAUXVAL 0
 
 #endif  // CRC32C_CRC32C_CONFIG_H_
