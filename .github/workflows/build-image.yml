@@ -1,0 +1,58 @@
+name: build-image
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# This build is heavy (TDLib + tgcalls + WebRTC from source); cancel runs
+# superseded by a newer commit on the same ref.
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # GHCR image, derived from the repo (e.g. ghcr.io/nikicat/tg-echo-service).
+  # Assumes the repo owner/name are lowercase, as GHCR requires.
+  IMAGE: ghcr.io/${{ github.repository }}
+  # Registry-backed layer cache. podman has no GHA cache backend, so it
+  # pushes/pulls intermediate layers to this repo instead, letting the
+  # expensive TDLib/tgcalls/WebRTC layers survive across runs.
+  CACHE_REPO: ghcr.io/${{ github.repository }}/buildcache
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04 # podman 4.9 — supports --layers --cache-to/--cache-from
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Pull request / manual runs: build only, read from cache, never push.
+      - name: Build image
+        if: github.event_name != 'push' || github.ref != 'refs/heads/master'
+        run: |
+          make image IMAGE="$IMAGE" \
+            IMAGE_BUILD_ARGS="--layers --cache-from $CACHE_REPO"
+
+      # master: build, populate the cache, and push the image + tools image.
+      - name: Build and push image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          make push IMAGE="$IMAGE" \
+            IMAGE_BUILD_ARGS="--layers --cache-from $CACHE_REPO --cache-to $CACHE_REPO"

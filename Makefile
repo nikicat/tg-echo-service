@@ -12,6 +12,10 @@ export CMAKE_BUILD_PARALLEL_LEVEL
 
 IMAGE ?= docker.io/nikicat/tg-echo-service
 
+# Extra flags for the main image build. CI injects layer-cache flags here
+# (e.g. --layers --cache-from/--cache-to <registry>); empty for local builds.
+IMAGE_BUILD_ARGS ?=
+
 .PHONY: all submodules tdlib configure build clean run run-only prompt glados-prompt image image-tools push push-tools
 
 all: build
@@ -72,7 +76,7 @@ image-tools:
 	podman build -t $(IMAGE)-tools -f Containerfile.tools .
 
 image: image-tools submodules
-	podman build -t $(IMAGE) .
+	podman build $(IMAGE_BUILD_ARGS) -t $(IMAGE) .
 
 push-tools: image-tools
 	podman push $(IMAGE)-tools
