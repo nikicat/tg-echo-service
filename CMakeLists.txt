@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 # ASM is needed to assemble openh264's aarch64 NEON .S files on arm64. openh264
 # also ships x86 SIMD, but as NASM/YASM .asm (needs a separate assembler) which
 # this build doesn't wire up, so x86_64 falls back to the portable C++ paths.
-project(call_service LANGUAGES C CXX ASM)
+project(tg-echo LANGUAGES C CXX ASM)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -238,17 +238,17 @@ set(TD_INSTALL_DIR "${CMAKE_SOURCE_DIR}/td-install")
 list(APPEND CMAKE_PREFIX_PATH "${TD_INSTALL_DIR}")
 find_package(Td REQUIRED)
 
-# -- Our call_service binary --
-add_executable(call_service main.cpp)
+# -- Our tg-echo binary --
+add_executable(tg-echo main.cpp)
 
-target_link_libraries(call_service PRIVATE
+target_link_libraries(tg-echo PRIVATE
   tgcalls
   Td::TdStatic
   mp3lame
   yuv  # libyuv: I420 scaling for incoming-video recording (brings its include dir)
 )
 
-target_include_directories(call_service PRIVATE
+target_include_directories(tg-echo PRIVATE
   "${TGCALLS_DIR}"
   "${TGCALLS_DIR}/tgcalls"
   "${WEBRTC_DIR}"
@@ -257,7 +257,7 @@ target_include_directories(call_service PRIVATE
   "${STUB_DIR}"
 )
 
-target_compile_definitions(call_service PRIVATE
+target_compile_definitions(tg-echo PRIVATE
   WEBRTC_POSIX
   WEBRTC_LINUX
   NDEBUG
@@ -267,7 +267,7 @@ target_compile_definitions(call_service PRIVATE
 # Arch-specific WebRTC defines, mirroring what BuildWebRTC.cmake sets on the
 # webrtc target so inline header code compiles the same way in this TU.
 if(ANDROID_ABI STREQUAL "x86_64")
-  target_compile_definitions(call_service PRIVATE HAVE_SSE2)
+  target_compile_definitions(tg-echo PRIVATE HAVE_SSE2)
 elseif(ANDROID_ABI STREQUAL "arm64-v8a")
-  target_compile_definitions(call_service PRIVATE WEBRTC_ARCH_ARM64 WEBRTC_HAS_NEON)
+  target_compile_definitions(tg-echo PRIVATE WEBRTC_ARCH_ARM64 WEBRTC_HAS_NEON)
 endif()

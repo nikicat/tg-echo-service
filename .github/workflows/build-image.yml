@@ -28,7 +28,7 @@ permissions:
   packages: write
 
 env:
-  # GHCR image, derived from the repo (e.g. ghcr.io/nikicat/tg-echo-service).
+  # GHCR image, derived from the repo (e.g. ghcr.io/nikicat/tg-echo).
   # Assumes the repo owner/name are lowercase, as GHCR requires.
   IMAGE: ghcr.io/${{ github.repository }}
   # Published tag: the git tag name on a tag push, otherwise "latest" (master).

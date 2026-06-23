@@ -1,10 +1,32 @@
-# tg-call-service
+# Telegram Echo
 
-Pure C++ service that accepts incoming Telegram voice calls, plays a PCM audio prompt, echoes the caller's audio back with a configurable delay, records to MP3, and sends the recording as a voice message after the call ends.
+> A self-hosted echo-test service for Telegram voice & video calls — call it to verify that your calls actually connect and that audio gets through your network.
 
-Uses [TDLib](https://github.com/tdlib/td) for Telegram signaling and [tgcalls](https://github.com/TGX-Android/tgcalls) for WebRTC audio.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Container image](https://img.shields.io/badge/image-docker.io%2Fnikicat%2Ftg--echo-2496ed.svg)](https://hub.docker.com/r/nikicat/tg-echo)
 
-## Architecture
+Think of it as Telegram's own version of Skype's old "Echo / Sound Test Service", but one you run yourself. When you ring it, **Telegram Echo** answers the call on a Telegram account, plays a short prompt, echoes your own voice back to you with a delay, records the call, and — after you hang up — sends the recording back as a voice message.
+
+Because it exercises a real call end-to-end, it's a quick way to answer a question that's otherwise hard to test alone: *do Telegram voice/video calls actually work on this connection?*
+
+## What it's for
+
+Telegram calls use peer-to-peer WebRTC, which is exactly the kind of traffic that flaky links and censorship infrastructure tend to break. This service gives you a call partner that's always available, so you can check the call path on demand:
+
+- 📶 **Flaky or high-latency connections** — confirm a call can connect and stay up, and hear the echo to judge the round-trip audio quality.
+- 🧱 **DPI / state-level firewalls** — verify whether voice/video calls get through deep-packet-inspection censorship at all.
+- 🔀 **Proxied Telegram** — check that calls still work when you route Telegram through a proxy or VPN, not just chats.
+- 🛠️ **A working reference for Telegram call automation** — a complete, runnable example of wiring [TDLib](https://github.com/tdlib/td) signaling to [tgcalls](https://github.com/TGX-Android/tgcalls) WebRTC audio with a custom audio device, MP3 recording, and voice-note delivery. Working code for this is hard to find.
+
+## What happens when you call it
+
+```
+1. You dial the service on Telegram        →  it auto-accepts the call
+2. It plays your prompt.mp3 once            →  you hear the greeting = signaling works
+3. You speak                               →  your voice is echoed back (with delay) = media flows
+4. The call is recorded                    →  recordings/recording_<timestamp>.mp3
+5. You hang up                             →  the recording is sent back as a voice message
+```
 
 ```
 TDLib (signaling)              tgcalls (WebRTC audio)
@@ -16,182 +38,128 @@ TDLib (signaling)              tgcalls (WebRTC audio)
   sendMessage (voice note)    FileRecorder -> recordings/*.mp3
 ```
 
-## Prerequisites
+## Quick start (no build toolchain)
 
-### System packages (Arch Linux)
+Runs from a pre-built container image — you only need Podman (or Docker) and Telegram API credentials.
 
-```
+1. **Get Telegram API credentials.** Create an app at <https://my.telegram.org/apps> to obtain an `api_id` and `api_hash`.
+
+   ```bash
+   export API_ID=12345
+   export API_HASH=abcdef1234567890
+   ```
+
+2. **Make a prompt** (first time only):
+
+   ```bash
+   podman compose --profile tools run --rm prompt          # simple beep
+   # or, with a GLaDOS voice:
+   podman compose --profile tools run --rm glados-prompt
+   ```
+
+3. **Log in to Telegram** (first time only, interactive — asks for phone, code, 2FA):
+
+   ```bash
+   podman compose --profile auth run --rm auth
+   ```
+
+4. **Start the service**, then call its account from another device to run a test:
+
+   ```bash
+   podman compose up -d tg-echo
+   ```
+
+Session data (`tdlib_db/`), recordings, and `prompt.mp3` are bind-mounted from the project directory, so they persist across restarts.
+
+> ⚠️ This logs in as a **real Telegram user account**, not a bot account — bot accounts can't receive calls. Use a dedicated account you control as the always-on test endpoint, then call it from your own account to test.
+
+## Configuration
+
+The service is configured via flags or environment variables:
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--api-id` | `API_ID` | — | Telegram API id (required) |
+| `--api-hash` | `API_HASH` | — | Telegram API hash (required) |
+| `--prompt` | — | `prompt.mp3` | Prompt played to the caller |
+| `--recordings-dir` | — | `recordings/` | Where MP3 recordings are written |
+| `--echo-delay` | `ECHO_DELAY` | `1000` | Echo delay in milliseconds |
+
+The prompt must be an MP3 (decoded to PCM at startup via LAME). Use any MP3 directly, or generate one with `make prompt` / `make glados-prompt GLADOS_TEXT="The cake is a lie."`.
+
+Recordings land in `recordings/recording_<unix_timestamp>.mp3` (VBR, high quality). Play them back with `ffplay recordings/recording_*.mp3`.
+
+TDLib persists its session in `tdlib_db/`; delete that directory to log out or switch accounts.
+
+## Build from source
+
+### Prerequisites (Arch Linux)
+
+```bash
 pacman -S openssl opus libvpx libyuv ffmpeg zlib gperf cmake lame
 ```
 
 All C++ dependencies (tgcalls, WebRTC, abseil, libsrtp, usrsctp, openh264, rnnoise, crc32c, libevent, libyuv) are vendored as git submodules under `vendor/`.
 
-## Build
+### Build
 
 ```bash
-git clone --recurse-submodules <repo-url>
-cd tg-call-service
+git clone --recurse-submodules ssh://git@github.com/nikicat/tg-echo.git
+cd tg-echo
 make
 ```
 
-This runs all build steps: init submodules, build TDLib, configure cmake, compile ~1400 sources. First build takes several minutes; subsequent `make` only recompiles changed files.
+`make` runs every step: init submodules, build TDLib, configure cmake, compile ~1400 sources. The first build takes several minutes; later builds only recompile what changed. Pass `BUILD_TYPE=Release` for an optimized build.
 
-Individual targets:
+Output: `build/tg-echo` (~270 MB debug; `strip -s` it to ~30 MB).
 
 | Target | Description |
 |--------|-------------|
-| `make` | Full build (submodules + TDLib + call_service) |
+| `make` | Full build (submodules + TDLib + tg-echo) |
 | `make tdlib` | Build TDLib only (into `td-install/`) |
-| `make build` | Build call_service only (assumes TDLib is built) |
+| `make build` | Build the tg-echo binary only (assumes TDLib is built) |
 | `make prompt` | Generate a test beep prompt (MP3) |
-| `make glados-prompt` | Generate prompt via GLaDOS TTS |
-| `make run` | Build + generate prompt + run the service |
+| `make glados-prompt` | Generate a prompt via GLaDOS TTS |
+| `make run` | Build + generate prompt + run |
+| `make image` / `make push` | Build / push the container image |
 | `make clean` | Remove build directories |
-
-Pass `BUILD_TYPE=Release` for optimized build.
-
-Output: `build/call_service` (~270MB debug, strip with `strip -s` for ~30MB).
-
-## Usage
-
-### Telegram API credentials
-
-Obtain `api_id` and `api_hash` from https://my.telegram.org/apps.
-
-Pass via environment variables or command-line flags:
-
-```bash
-# env vars
-export API_ID=12345
-export API_HASH=abcdef1234567890
-
-# or flags
-./build/call_service --api-id 12345 --api-hash abcdef1234567890
-```
-
-Tip: use a `.envrc` with [direnv](https://direnv.net/) to load them automatically.
-
-### Prepare audio prompt
-
-The prompt must be an MP3 file. It is decoded to PCM at startup via LAME.
-
-```bash
-# use any MP3 file directly
-cp greeting.mp3 prompt.mp3
-
-# or generate a test beep
-make prompt
-
-# or generate a GLaDOS voice prompt (https://glados.c-net.org/)
-make glados-prompt
-make glados-prompt GLADOS_TEXT="The cake is a lie. Leave a message."
-```
 
 ### Run
 
 ```bash
-./build/call_service [--prompt prompt.mp3] [--recordings-dir recordings/] [--echo-delay 1000]
+./build/tg-echo [--prompt prompt.mp3] [--recordings-dir recordings/] [--echo-delay 1000]
 ```
 
-| Flag | Env var | Default | Description |
-|------|---------|---------|-------------|
-| `--prompt` | — | `prompt.mp3` | PCM audio prompt file |
-| `--recordings-dir` | — | `recordings/` | Directory for MP3 recordings |
-| `--echo-delay` | `ECHO_DELAY` | `1000` | Echo delay in milliseconds |
-
-On first run, TDLib will prompt interactively for:
-1. Phone number
-2. Auth code (sent to Telegram)
-3. 2FA password (if enabled)
-
-### TDLib session storage
-
-TDLib persists its session in `tdlib_db/` in the working directory. Subsequent runs skip authentication. Delete this directory to log out / switch accounts.
-
-### Recordings
-
-Caller audio is saved as MP3 to `recordings/recording_<unix_timestamp>.mp3` (VBR, high quality). After the call ends, the recording is automatically sent back to the caller as a Telegram voice message.
-
-Play back:
-
-```bash
-ffplay recordings/recording_*.mp3
-```
-
-## Running with Podman Compose
-
-No build toolchain required — uses a pre-built image from Docker Hub.
-
-### Quick start
-
-```bash
-export API_ID=12345
-export API_HASH=abcdef1234567890
-
-# Generate a prompt (first time only)
-podman compose --profile tools run --rm prompt
-# or with GLaDOS voice:
-podman compose --profile tools run --rm glados-prompt
-
-# Authenticate with Telegram (first time only, interactive)
-podman compose --profile auth run --rm auth
-
-# Start the service
-podman compose up -d call-service
-```
-
-### Building the image locally
-
-```bash
-make image                  # builds docker.io/nikicat/tg-echo-service
-make push                   # builds and pushes to Docker Hub
-make image IMAGE=foo/bar    # custom image name
-```
-
-### Compose services
-
-| Service | Profile | Description |
-|---------|---------|-------------|
-| `call-service` | *(default)* | Long-running echo service |
-| `auth` | `auth` | Interactive TDLib authentication |
-| `prompt` | `tools` | Generate beep prompt via ffmpeg |
-| `glados-prompt` | `tools` | Generate prompt via GLaDOS TTS |
-
-Session data (`tdlib_db/`), recordings, and `prompt.mp3` are bind-mounted from the project directory.
+On first run TDLib asks interactively for your phone number, the auth code Telegram sends you, and your 2FA password if set.
 
 ## How it works
 
-1. TDLib receives `updateCall` with `callStatePending` (incoming call)
-2. Service sends `acceptCall` with supported tgcalls protocol versions
-3. TDLib receives `callStateReady` with relay servers and encryption key
-4. Service maps TDLib call servers to tgcalls endpoints/RTC servers, creates a tgcalls `Instance` via `Meta::Create`
-5. `FakeAudioDeviceModule` provides custom audio I/O via `EchoPlayer` (implements both `Recorder` and `Renderer`): plays the prompt once, then echoes caller audio back with a configurable delay. `FileRecorder` encodes to MP3 via LAME
-6. Signaling data is relayed bidirectionally between TDLib and tgcalls
-7. On hangup, the MP3 recording is finalized and sent to the caller as a voice message via `sendMessage` + `inputMessageVoiceNote`
+1. TDLib receives `updateCall` with `callStatePending` (an incoming call).
+2. The service sends `acceptCall` with the supported tgcalls protocol versions.
+3. TDLib reports `callStateReady` with relay servers and the encryption key.
+4. The service maps TDLib's call servers to tgcalls endpoints/RTC servers and creates a tgcalls `Instance` via `Meta::Create`.
+5. A `FakeAudioDeviceModule` supplies custom audio I/O: `EchoPlayer` (acting as both `Recorder` and `Renderer`) plays the prompt once, then echoes caller audio back with the configured delay, while `FileRecorder` encodes everything to MP3 via LAME.
+6. Signaling data is relayed bidirectionally between TDLib and tgcalls.
+7. On hangup, the MP3 is finalized and sent to the caller as a voice message via `sendMessage` + `inputMessageVoiceNote`.
 
 ## Project structure
 
 ```
-CMakeLists.txt                Build orchestrator (vendored deps + tgcalls + our code)
 main.cpp                      EchoPlayer, FileRecorder, CallService, auth flow, event loop
+video_platform.cpp            Video frame plumbing
+CMakeLists.txt                Build orchestrator (vendored deps + tgcalls + our code)
+compose.yaml                  Podman/Docker Compose services (tg-echo, auth, tools)
+deploy/                       Podman Quadlet unit for systemd-managed deployment
 stub/                         Build stubs (config.h, crc32c config, AudioDeviceModule stub)
-vendor/                       Vendored dependencies (git submodules + cmake files)
-  Build*.cmake                CMake build scripts (from Telegram-X)
-  tgcalls/                    TGX-Android/tgcalls (call protocol library)
-  webrtc/                     TGX-Android/webrtc (WebRTC fork)
-  abseil-cpp/                 abseil/abseil-cpp
-  libsrtp/                    cisco/libsrtp
-  usrsctp/                    sctplab/usrsctp
-  openh264/                   cisco/openh264
-  rnnoise/                    xiph/rnnoise
-  crc32c/                     google/crc32c
-  libevent/                   TGX-Android/libevent
-  libyuv/                     chromium/libyuv
-  td/                         tdlib/td (TDLib source, built separately into td-install/)
-  webrtc_deps/                Copied files from chromium (pffft, rnnoise weights, field trials)
-  third_party/                Symlinks for WebRTC include resolution (libyuv, libsrtp, etc.)
-td-install/                   TDLib cmake exports and static libraries (not committed)
+vendor/                       Vendored dependencies (git submodules + cmake build scripts)
+  tgcalls/  webrtc/  td/      Core: call protocol, WebRTC fork, TDLib
+  abseil-cpp/ libsrtp/ ...    Supporting libraries
+td-install/                   TDLib cmake exports + static libs (not committed)
 build/                        CMake build directory (not committed)
 tdlib_db/                     TDLib session data (not committed)
 recordings/                   Recorded audio files (not committed)
 ```
+
+## License
+
+This project's original code is released under the [MIT License](LICENSE). It links several third-party libraries with their own terms — most notably **tgcalls (LGPL v3)**. See [NOTICE.md](NOTICE.md) for the full dependency licensing breakdown and what it means for redistributing binaries.

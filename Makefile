@@ -10,7 +10,7 @@ else
 endif
 export CMAKE_BUILD_PARALLEL_LEVEL
 
-IMAGE ?= docker.io/nikicat/tg-echo-service
+IMAGE ?= docker.io/nikicat/tg-echo
 
 # Extra flags for the main image build. CI injects layer-cache flags here
 # (e.g. --layers --cache-from/--cache-to <registry>); empty for local builds.
@@ -45,10 +45,10 @@ configure: build/Makefile
 build/Makefile: CMakeLists.txt tdlib
 	cmake -B build -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
 
-# Build call_service binary
-build: build/call_service
+# Build tg-echo binary
+build: build/tg-echo
 
-build/call_service: build/Makefile main.cpp
+build/tg-echo: build/Makefile main.cpp
 	cmake --build build -j$(CMAKE_BUILD_PARALLEL_LEVEL)
 
 # Generate a test prompt (440Hz beeps, MP3). Override count: make prompt BEEPS=2
@@ -73,12 +73,12 @@ glados-prompt:
 # Run the service (requires API_ID and API_HASH env vars)
 run: build prompt
 	mkdir -p recordings
-	./build/call_service
+	./build/tg-echo
 
 # Run the already-built binary, skipping the build/prompt prerequisites
 run-only:
 	mkdir -p recordings
-	./build/call_service
+	./build/tg-echo
 
 image-tools:
 	podman build --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(IMAGE)-tools:$(TAG) -f Containerfile.tools .
