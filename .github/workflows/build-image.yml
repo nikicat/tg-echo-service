@@ -4,7 +4,17 @@ on:
   push:
     branches: [master]
     tags: ['*']
+    paths-ignore:
+      - '**.md'
+      - 'deploy/**'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'deploy/**'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
 # This build is heavy (TDLib + tgcalls + WebRTC from source); cancel runs
