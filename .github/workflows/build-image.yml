@@ -3,6 +3,7 @@ name: build-image
 on:
   push:
     branches: [master]
+    tags: ['*']
   pull_request:
   workflow_dispatch:
 
@@ -20,6 +21,8 @@ env:
   # GHCR image, derived from the repo (e.g. ghcr.io/nikicat/tg-echo-service).
   # Assumes the repo owner/name are lowercase, as GHCR requires.
   IMAGE: ghcr.io/${{ github.repository }}
+  # Published tag: the git tag name on a tag push, otherwise "latest" (master).
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
 
 jobs:
   # Build each architecture natively on its own runner (emulation is not viable
@@ -52,26 +55,27 @@ jobs:
 
       # Pull request / manual runs: build only, read from cache, never push.
       - name: Build image
-        if: github.event_name != 'push' || github.ref != 'refs/heads/master'
+        if: github.event_name != 'push'
         run: |
           make image \
             IMAGE="$IMAGE" TAG="${{ matrix.arch }}" \
             IMAGE_BUILD_ARGS="--layers --cache-from $IMAGE/buildcache-${{ matrix.arch }}"
 
-      # master: build, populate the per-arch cache, and push the per-arch tag
-      # (image + tools image). The manifest job stitches them into :latest.
+      # Push events (master branch or a git tag): build, populate the per-arch
+      # cache, and push the per-arch tag <VERSION>-<arch> (image + tools image).
+      # The manifest job stitches them into the multi-arch :<VERSION>.
       - name: Build and push per-arch image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        if: github.event_name == 'push'
         run: |
           make push \
-            IMAGE="$IMAGE" TAG="${{ matrix.arch }}" \
+            IMAGE="$IMAGE" TAG="$VERSION-${{ matrix.arch }}" \
             IMAGE_BUILD_ARGS="--layers --cache-from $IMAGE/buildcache-${{ matrix.arch }} --cache-to $IMAGE/buildcache-${{ matrix.arch }}"
 
-  # Combine the per-arch tags into multi-arch manifests for the image and the
-  # tools image. Manifests are arch-agnostic metadata, so this runs on amd64.
+  # Combine the per-arch tags into the multi-arch :<VERSION> manifest for the
+  # image and the tools image. Manifests are arch-agnostic, so this runs on amd64.
   manifest:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
       - name: Log in to GHCR
@@ -80,9 +84,9 @@ jobs:
       - name: Create and push multi-arch manifests
         run: |
           for repo in "$IMAGE" "$IMAGE-tools"; do
-            podman manifest create "$repo:latest"
-            podman manifest add "$repo:latest" "$repo:amd64"
-            podman manifest add "$repo:latest" "$repo:arm64"
-            podman manifest push --all "$repo:latest" "docker://$repo:latest"
-            podman manifest rm "$repo:latest"
+            podman manifest create "$repo:$VERSION"
+            podman manifest add "$repo:$VERSION" "$repo:$VERSION-amd64"
+            podman manifest add "$repo:$VERSION" "$repo:$VERSION-arm64"
+            podman manifest push --all "$repo:$VERSION" "docker://$repo:$VERSION"
+            podman manifest rm "$repo:$VERSION"
           done
