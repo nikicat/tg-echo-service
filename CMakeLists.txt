@@ -139,8 +139,11 @@ target_compile_options(webrtc PRIVATE -Wno-error -Wno-deprecated-declarations
   "SHELL:-include stdint.h" "SHELL:-include stddef.h")
 target_compile_options(absl PRIVATE -Wno-error
   "SHELL:-include stdint.h" "SHELL:-include stddef.h")
+# Force-includes are for the C/C++ sources only — openh264's arm64 .S assembly
+# sources must not get them (the assembler can't parse stdint.h's typedefs).
 target_compile_options(openh264 PRIVATE
-  "SHELL:-include stdint.h" "SHELL:-include stddef.h")
+  "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-include stdint.h>"
+  "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-include stddef.h>")
 target_compile_options(usrsctp PRIVATE
   "SHELL:-include stdint.h" "SHELL:-include stddef.h")
 target_compile_options(srtp PRIVATE
