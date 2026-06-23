@@ -8,7 +8,7 @@ FROM ${BASE_IMAGE} AS builder
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential git cmake pkg-config gperf ca-certificates \
-    libssl-dev libopus-dev libvpx-dev libavcodec-dev libavutil-dev \
+    libssl-dev libopus-dev libvpx-dev libavcodec-dev libavformat-dev libavutil-dev \
     zlib1g-dev libmp3lame-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -18,6 +18,11 @@ WORKDIR /src
 COPY vendor/ vendor/
 COPY stub/ stub/
 COPY CMakeLists.txt ./
+
+# WebRTC includes ffmpeg as "third_party/ffmpeg/libav*/...". The vendored
+# symlink targets /usr/include (Arch's flat layout); Debian/Ubuntu keep those
+# headers under a multiarch triplet dir, so repoint it for this build.
+RUN ln -sfn "/usr/include/$(uname -m)-linux-gnu" vendor/third_party/ffmpeg
 
 # Build TDLib
 RUN cmake -B vendor/td/build -S vendor/td -DCMAKE_BUILD_TYPE=Release && \
