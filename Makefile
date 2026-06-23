@@ -16,6 +16,14 @@ IMAGE ?= docker.io/nikicat/tg-echo-service
 # (e.g. --layers --cache-from/--cache-to <registry>); empty for local builds.
 IMAGE_BUILD_ARGS ?=
 
+# Container base image. Ubuntu's official image is glibc + multi-arch, so the
+# same base builds on both amd64 and arm64.
+BASE_IMAGE ?= docker.io/ubuntu:24.04
+
+# Image tag. CI uses per-arch tags (amd64/arm64) and combines them into a
+# multi-arch :latest manifest; local builds just use :latest.
+TAG ?= latest
+
 .PHONY: all submodules tdlib configure build clean run run-only prompt glados-prompt image image-tools push push-tools
 
 all: build
@@ -73,16 +81,16 @@ run-only:
 	./build/call_service
 
 image-tools:
-	podman build -t $(IMAGE)-tools -f Containerfile.tools .
+	podman build --build-arg BASE_IMAGE=$(BASE_IMAGE) -t $(IMAGE)-tools:$(TAG) -f Containerfile.tools .
 
 image: image-tools submodules
-	podman build $(IMAGE_BUILD_ARGS) -t $(IMAGE) .
+	podman build --build-arg BASE_IMAGE=$(BASE_IMAGE) $(IMAGE_BUILD_ARGS) -t $(IMAGE):$(TAG) .
 
 push-tools: image-tools
-	podman push $(IMAGE)-tools
+	podman push $(IMAGE)-tools:$(TAG)
 
 push: image push-tools
-	podman push $(IMAGE)
+	podman push $(IMAGE):$(TAG)
 
 clean:
 	rm -rf build vendor/td/build

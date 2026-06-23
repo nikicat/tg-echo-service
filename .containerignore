@@ -1,6 +1,7 @@
 build/
 td-install/
 vendor/td/build/
+vendor/libyuv/build/
 tdlib_db/
 recordings/
 .envrc

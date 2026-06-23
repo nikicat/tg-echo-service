@@ -1,8 +1,16 @@
-# Stage 1: build
-FROM docker.io/archlinux:latest AS builder
+# Base image. Ubuntu's official image is glibc + multi-arch (amd64/arm64), so a
+# single base serves both architectures. Declared before FROM so both stages
+# pick it up; override BASE_IMAGE to pin a different tag.
+ARG BASE_IMAGE=docker.io/ubuntu:24.04
 
-RUN pacman -Syu --noconfirm \
-    base-devel git cmake openssl opus libvpx libyuv ffmpeg zlib gperf lame
+# Stage 1: build
+FROM ${BASE_IMAGE} AS builder
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential git cmake pkg-config gperf ca-certificates \
+    libssl-dev libopus-dev libvpx-dev libavcodec-dev libavutil-dev \
+    zlib1g-dev libmp3lame-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
@@ -16,9 +24,17 @@ RUN cmake -B vendor/td/build -S vendor/td -DCMAKE_BUILD_TYPE=Release && \
     cmake --build vendor/td/build -j$(nproc) && \
     cmake --install vendor/td/build --prefix /src/td-install
 
+# libyuv isn't packaged on Ubuntu, so build the vendored submodule as a static,
+# position-independent lib that links into the (PIE) executable. The project
+# locates it via find_library(yuv) and uses the vendored headers directly.
+RUN cmake -B vendor/libyuv/build -S vendor/libyuv -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
+    cmake --build vendor/libyuv/build -j$(nproc) --target yuv && \
+    install -Dm644 vendor/libyuv/build/libyuv.a /usr/local/lib/libyuv.a
+
 # Custom tgcalls platform source (compiled into the tgcalls lib, so it must
-# exist at configure time). Copied after TDLib so editing it doesn't bust the
-# cached TDLib layer, but before configure since CMakeLists.txt references it.
+# exist at configure time). Copied after the deps so editing it doesn't bust the
+# cached TDLib/libyuv layers, but before configure since CMakeLists.txt uses it.
 COPY video_platform.cpp .
 
 # Configure and build all deps (tgcalls pulls in webrtc, absl, etc.)
@@ -30,14 +46,27 @@ COPY main.cpp .
 RUN cmake --build build -j$(nproc) --target call_service
 RUN strip -s build/call_service
 
-# Stage 2: runtime
-FROM docker.io/archlinux:latest
+# Collect the binary's shared-library closure (minus the glibc core the runtime
+# base already ships) into /rootfs. This keeps the runtime image minimal without
+# hand-listing version-suffixed Debian runtime packages, and works identically
+# on amd64 and arm64.
+RUN mkdir -p /rootfs && \
+    ldd build/call_service | awk '/=> \//{print $3}' | sort -u | \
+    grep -vE '/(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libgcc_s)\.so' | \
+    xargs -I{} install -D {} /rootfs{}
 
-RUN pacman -Syu --noconfirm openssl opus libvpx libyuv ffmpeg zlib lame && \
-    pacman -Scc --noconfirm
+# Stage 2: runtime
+FROM ${BASE_IMAGE}
+
+# ca-certificates for TLS to Telegram; the shared libs come from /rootfs above.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+COPY --from=builder /rootfs/ /
+RUN ldconfig
 COPY --from=builder /src/build/call_service .
 
 ENTRYPOINT ["./call_service"]

@@ -1,5 +1,8 @@
-FROM docker.io/archlinux:latest
-RUN pacman -Syu --noconfirm make ffmpeg curl && pacman -Scc --noconfirm
+ARG BASE_IMAGE=docker.io/ubuntu:24.04
+FROM ${BASE_IMAGE}
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    make ffmpeg curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY Makefile /Makefile
 WORKDIR /out
 ENTRYPOINT ["make", "-f", "/Makefile"]

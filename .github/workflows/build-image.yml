@@ -20,14 +20,21 @@ env:
   # GHCR image, derived from the repo (e.g. ghcr.io/nikicat/tg-echo-service).
   # Assumes the repo owner/name are lowercase, as GHCR requires.
   IMAGE: ghcr.io/${{ github.repository }}
-  # Registry-backed layer cache. podman has no GHA cache backend, so it
-  # pushes/pulls intermediate layers to this repo instead, letting the
-  # expensive TDLib/tgcalls/WebRTC layers survive across runs.
-  CACHE_REPO: ghcr.io/${{ github.repository }}/buildcache
 
 jobs:
+  # Build each architecture natively on its own runner (emulation is not viable
+  # for a from-source WebRTC build). The Ubuntu base is multi-arch, so both legs
+  # share one Containerfile with no per-arch base.
   build:
-    runs-on: ubuntu-24.04 # podman 4.9 — supports --layers --cache-to/--cache-from
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
@@ -47,12 +54,35 @@ jobs:
       - name: Build image
         if: github.event_name != 'push' || github.ref != 'refs/heads/master'
         run: |
-          make image IMAGE="$IMAGE" \
-            IMAGE_BUILD_ARGS="--layers --cache-from $CACHE_REPO"
+          make image \
+            IMAGE="$IMAGE" TAG="${{ matrix.arch }}" \
+            IMAGE_BUILD_ARGS="--layers --cache-from $IMAGE/buildcache-${{ matrix.arch }}"
 
-      # master: build, populate the cache, and push the image + tools image.
-      - name: Build and push image
+      # master: build, populate the per-arch cache, and push the per-arch tag
+      # (image + tools image). The manifest job stitches them into :latest.
+      - name: Build and push per-arch image
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
-          make push IMAGE="$IMAGE" \
-            IMAGE_BUILD_ARGS="--layers --cache-from $CACHE_REPO --cache-to $CACHE_REPO"
+          make push \
+            IMAGE="$IMAGE" TAG="${{ matrix.arch }}" \
+            IMAGE_BUILD_ARGS="--layers --cache-from $IMAGE/buildcache-${{ matrix.arch }} --cache-to $IMAGE/buildcache-${{ matrix.arch }}"
+
+  # Combine the per-arch tags into multi-arch manifests for the image and the
+  # tools image. Manifests are arch-agnostic metadata, so this runs on amd64.
+  manifest:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Create and push multi-arch manifests
+        run: |
+          for repo in "$IMAGE" "$IMAGE-tools"; do
+            podman manifest create "$repo:latest"
+            podman manifest add "$repo:latest" "$repo:amd64"
+            podman manifest add "$repo:latest" "$repo:arm64"
+            podman manifest push --all "$repo:latest" "docker://$repo:latest"
+            podman manifest rm "$repo:latest"
+          done
