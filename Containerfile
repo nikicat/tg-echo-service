@@ -16,6 +16,11 @@ RUN cmake -B vendor/td/build -S vendor/td -DCMAKE_BUILD_TYPE=Release && \
     cmake --build vendor/td/build -j$(nproc) && \
     cmake --install vendor/td/build --prefix /src/td-install
 
+# Custom tgcalls platform source (compiled into the tgcalls lib, so it must
+# exist at configure time). Copied after TDLib so editing it doesn't bust the
+# cached TDLib layer, but before configure since CMakeLists.txt references it.
+COPY video_platform.cpp .
+
 # Configure and build all deps (tgcalls pulls in webrtc, absl, etc.)
 RUN touch main.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release
 RUN cmake --build build -j$(nproc) --target tgcalls
