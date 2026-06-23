@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
-# ASM is needed to assemble openh264's aarch64 NEON .S files on arm64 (unused on
-# x86, where openh264 has no assembly sources).
+# ASM is needed to assemble openh264's aarch64 NEON .S files on arm64. openh264
+# also ships x86 SIMD, but as NASM/YASM .asm (needs a separate assembler) which
+# this build doesn't wire up, so x86_64 falls back to the portable C++ paths.
 project(call_service LANGUAGES C CXX ASM)
 
 set(CMAKE_CXX_STANDARD 20)
