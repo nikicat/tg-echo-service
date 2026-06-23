@@ -52,25 +52,29 @@ RUN cmake --build build -j$(nproc) --target call_service
 RUN strip -s build/call_service
 
 # Collect the binary's shared-library closure (minus the glibc core the runtime
-# base already ships) into /rootfs. This keeps the runtime image minimal without
-# hand-listing version-suffixed Debian runtime packages, and works identically
-# on amd64 and arm64.
+# base already ships) into a flat dir. The runtime stage drops these into
+# /usr/local/lib; copying flat avoids recreating /lib as a real directory, which
+# (via Ubuntu's /lib -> /usr/lib usrmerge symlink) a path-preserving copy onto /
+# would clobber, breaking the dynamic linker. This keeps the runtime minimal
+# without hand-listing version-suffixed Debian packages, identically on amd64/arm64.
 RUN mkdir -p /rootfs && \
     ldd build/call_service | awk '/=> \//{print $3}' | sort -u | \
     grep -vE '/(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libgcc_s)\.so' | \
-    xargs -I{} install -D {} /rootfs{}
+    xargs -I{} cp -L {} /rootfs/
 
 # Stage 2: runtime
 FROM ${BASE_IMAGE}
 
-# ca-certificates for TLS to Telegram; the shared libs come from /rootfs above.
+# ca-certificates for TLS to Telegram; the app's shared libs come from /rootfs.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY --from=builder /rootfs/ /
+# /usr/local/lib is on the default loader path; ldconfig registers the copied
+# libs (and their soname links) without touching system lib dirs.
+COPY --from=builder /rootfs/ /usr/local/lib/
 RUN ldconfig
 COPY --from=builder /src/build/call_service .
 
